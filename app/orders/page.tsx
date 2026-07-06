@@ -17,6 +17,8 @@ export default function OrdersPage() {
   const [total, setTotal] = useState(0);
   const [searchExternalCode, setSearchExternalCode] = useState('');
   const [searchReceiverName, setSearchReceiverName] = useState('');
+  const [searchDateStart, setSearchDateStart] = useState('');
+  const [searchDateEnd, setSearchDateEnd] = useState('');
   const pageSize = 20;
 
   const loadOrders = useCallback(async () => {
@@ -28,6 +30,8 @@ export default function OrdersPage() {
       });
       if (searchExternalCode) params.set('externalCode', searchExternalCode);
       if (searchReceiverName) params.set('receiverName', searchReceiverName);
+      if (searchDateStart) params.set('createdAtStart', new Date(searchDateStart).toISOString());
+      if (searchDateEnd) params.set('createdAtEnd', new Date(searchDateEnd + 'T23:59:59').toISOString());
 
       const res = await fetch(`/api/orders?${params}`);
       const data = await res.json();
@@ -38,7 +42,7 @@ export default function OrdersPage() {
     } finally {
       setLoading(false);
     }
-  }, [page, searchExternalCode, searchReceiverName]);
+  }, [page, searchExternalCode, searchReceiverName, searchDateStart, searchDateEnd]);
 
   useEffect(() => {
     loadOrders();
@@ -47,6 +51,14 @@ export default function OrdersPage() {
   const handleSearch = () => {
     setPage(1);
     loadOrders();
+  };
+
+  const handleReset = () => {
+    setSearchExternalCode('');
+    setSearchReceiverName('');
+    setSearchDateStart('');
+    setSearchDateEnd('');
+    setPage(1);
   };
 
   const handleExport = () => {
@@ -69,36 +81,53 @@ export default function OrdersPage() {
 
       {/* 搜索 */}
       <div className="card card-sm mb-4">
-        <div className="flex items-center gap-4 flex-wrap">
-          <div className="flex items-center gap-2">
-            <label className="text-sm text-[#4e5969] whitespace-nowrap">外部编码</label>
-            <input
-              type="text"
-              value={searchExternalCode}
-              onChange={e => setSearchExternalCode(e.target.value)}
-              onKeyDown={e => e.key === 'Enter' && handleSearch()}
-              className="form-input text-sm w-48"
-              placeholder="输入搜索..."
-            />
+        <div className="space-y-3">
+          <div className="flex items-center gap-4 flex-wrap">
+            <div className="flex items-center gap-2">
+              <label className="text-sm text-[#4e5969] whitespace-nowrap">外部编码</label>
+              <input
+                type="text"
+                value={searchExternalCode}
+                onChange={e => setSearchExternalCode(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && handleSearch()}
+                className="form-input text-sm w-48"
+                placeholder="输入搜索..."
+              />
+            </div>
+            <div className="flex items-center gap-2">
+              <label className="text-sm text-[#4e5969] whitespace-nowrap">收件人姓名</label>
+              <input
+                type="text"
+                value={searchReceiverName}
+                onChange={e => setSearchReceiverName(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && handleSearch()}
+                className="form-input text-sm w-48"
+                placeholder="输入搜索..."
+              />
+            </div>
           </div>
-          <div className="flex items-center gap-2">
-            <label className="text-sm text-[#4e5969] whitespace-nowrap">收件人姓名</label>
-            <input
-              type="text"
-              value={searchReceiverName}
-              onChange={e => setSearchReceiverName(e.target.value)}
-              onKeyDown={e => e.key === 'Enter' && handleSearch()}
-              className="form-input text-sm w-48"
-              placeholder="输入搜索..."
-            />
+          <div className="flex items-center gap-4 flex-wrap">
+            <div className="flex items-center gap-2">
+              <label className="text-sm text-[#4e5969] whitespace-nowrap">提交时间</label>
+              <input
+                type="date"
+                value={searchDateStart}
+                onChange={e => setSearchDateStart(e.target.value)}
+                className="form-input text-sm w-40"
+              />
+              <span className="text-sm text-[#86909c]">至</span>
+              <input
+                type="date"
+                value={searchDateEnd}
+                onChange={e => setSearchDateEnd(e.target.value)}
+                className="form-input text-sm w-40"
+              />
+            </div>
+            <div className="flex items-center gap-2">
+              <button onClick={handleSearch} className="btn btn-primary btn-sm">搜索</button>
+              <button onClick={handleReset} className="btn btn-outline btn-sm">重置</button>
+            </div>
           </div>
-          <button onClick={handleSearch} className="btn btn-primary btn-sm">搜索</button>
-          <button
-            onClick={() => { setSearchExternalCode(''); setSearchReceiverName(''); setPage(1); }}
-            className="btn btn-outline btn-sm"
-          >
-            重置
-          </button>
         </div>
       </div>
 
@@ -115,10 +144,10 @@ export default function OrdersPage() {
           <div className="empty-state">
             <div className="empty-state-icon">📦</div>
             <p className="empty-state-text font-medium text-[#1d2129]">
-              {searchExternalCode || searchReceiverName ? '未找到匹配的运单' : '暂无运单数据'}
+              {searchExternalCode || searchReceiverName || searchDateStart || searchDateEnd ? '未找到匹配的运单' : '暂无运单数据'}
             </p>
             <p className="text-[#86909c] text-sm">
-              {searchExternalCode || searchReceiverName ? '请尝试其他搜索条件' : '导入文件并提交后可在此查看'}
+              {searchExternalCode || searchReceiverName || searchDateStart || searchDateEnd ? '请尝试其他搜索条件' : '导入文件并提交后可在此查看'}
             </p>
           </div>
         ) : (
@@ -159,11 +188,11 @@ export default function OrdersPage() {
             </div>
 
             {/* 分页 */}
-            {totalPages > 1 && (
-              <div className="flex items-center justify-between px-4 py-3 border-t border-[#e5e6eb]">
-                <span className="text-sm text-[#86909c]">
-                  共 {total} 条，第 {page}/{totalPages} 页
-                </span>
+            <div className="flex items-center justify-between px-4 py-3 border-t border-[#e5e6eb]">
+              <span className="text-sm text-[#86909c]">
+                共 {total} 条{totalPages > 1 ? `，第 ${page}/${totalPages} 页` : ''}
+              </span>
+              {totalPages > 1 && (
                 <div className="flex items-center gap-1">
                   <button
                     onClick={() => setPage(1)}
@@ -194,8 +223,8 @@ export default function OrdersPage() {
                     末页
                   </button>
                 </div>
-              </div>
-            )}
+              )}
+            </div>
           </>
         )}
       </div>

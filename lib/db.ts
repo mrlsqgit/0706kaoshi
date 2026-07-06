@@ -206,7 +206,7 @@ const SupabaseStore = {
 
   // ---- Orders ----
 
-  async getOrders(page: number, pageSize: number, filters?: { externalCode?: string; receiverName?: string }): Promise<{ orders: OrderRecord[]; total: number }> {
+  async getOrders(page: number, pageSize: number, filters?: { externalCode?: string; receiverName?: string; createdAtStart?: string; createdAtEnd?: string }): Promise<{ orders: OrderRecord[]; total: number }> {
     const from = (page - 1) * pageSize;
     const to = from + pageSize - 1;
 
@@ -219,6 +219,12 @@ const SupabaseStore = {
     }
     if (filters?.receiverName) {
       query = query.ilike('receiver_name', `%${filters.receiverName}%`);
+    }
+    if (filters?.createdAtStart) {
+      query = query.gte('created_at', filters.createdAtStart);
+    }
+    if (filters?.createdAtEnd) {
+      query = query.lte('created_at', filters.createdAtEnd);
     }
 
     const { data, error, count } = await query
@@ -296,10 +302,12 @@ class MemoryStore {
     return true;
   }
 
-  async getOrders(page: number, pageSize: number, filters?: { externalCode?: string; receiverName?: string }): Promise<{ orders: OrderRecord[]; total: number }> {
+  async getOrders(page: number, pageSize: number, filters?: { externalCode?: string; receiverName?: string; createdAtStart?: string; createdAtEnd?: string }): Promise<{ orders: OrderRecord[]; total: number }> {
     let filtered = [...this.orders];
     if (filters?.externalCode) filtered = filtered.filter(o => o.externalCode?.includes(filters.externalCode!));
     if (filters?.receiverName) filtered = filtered.filter(o => o.receiverName?.includes(filters.receiverName!));
+    if (filters?.createdAtStart) filtered = filtered.filter(o => o.createdAt && o.createdAt >= filters.createdAtStart!);
+    if (filters?.createdAtEnd) filtered = filtered.filter(o => o.createdAt && o.createdAt <= filters.createdAtEnd!);
     const total = filtered.length;
     const start = (page - 1) * pageSize;
     return { orders: filtered.slice(start, start + pageSize), total };
@@ -349,7 +357,7 @@ export async function deleteRule(id: string): Promise<boolean> {
   return useSupabase ? SupabaseStore.deleteRule(id) : memoryStore.deleteRule(id);
 }
 
-export async function getOrders(page: number, pageSize: number, filters?: { externalCode?: string; receiverName?: string }): Promise<{ orders: OrderRecord[]; total: number }> {
+export async function getOrders(page: number, pageSize: number, filters?: { externalCode?: string; receiverName?: string; createdAtStart?: string; createdAtEnd?: string }): Promise<{ orders: OrderRecord[]; total: number }> {
   return useSupabase ? SupabaseStore.getOrders(page, pageSize, filters) : memoryStore.getOrders(page, pageSize, filters);
 }
 

@@ -1,6 +1,8 @@
 'use client';
 
-import { useState, useCallback, useMemo } from 'react';
+import { useState, useCallback, useRef } from 'react';
+import { FixedSizeList as List } from 'react-window';
+import AutoSizer from 'react-virtualized-auto-sizer';
 import { OrderRecord, ORDER_FIELD_LABELS, OrderField } from '@/lib/types';
 import { exportToExcel } from '@/lib/utils';
 import { validateRecords, checkDuplicates } from '@/lib/rule-engine';
@@ -9,6 +11,10 @@ const COLUMNS: OrderField[] = [
   'externalCode', 'storeName', 'receiverName', 'receiverPhone', 'receiverAddress',
   'skuCode', 'skuName', 'skuQuantity', 'skuSpec', 'remark',
 ];
+
+const ROW_HEIGHT = 42;
+// 超过此阈值启用虚拟列表
+const VIRTUAL_THRESHOLD = 50;
 
 interface DataPreviewTableProps {
   records: OrderRecord[];
@@ -19,6 +25,7 @@ interface DataPreviewTableProps {
 export default function DataPreviewTable({ records, onChange, existingCodes }: DataPreviewTableProps) {
   const [editCell, setEditCell] = useState<{ row: number; field: OrderField } | null>(null);
   const [editValue, setEditValue] = useState('');
+  const inputRef = useRef<HTMLInputElement>(null);
 
   const handleCellClick = useCallback((rowIndex: number, field: OrderField) => {
     const record = records[rowIndex];
@@ -27,6 +34,8 @@ export default function DataPreviewTable({ records, onChange, existingCodes }: D
       : String((record as Record<string, unknown>)[field] || '');
     setEditValue(value);
     setEditCell({ row: rowIndex, field });
+    // 聚焦输入框
+    setTimeout(() => inputRef.current?.focus(), 50);
   }, [records]);
 
   const handleCellSave = useCallback(() => {
@@ -54,7 +63,6 @@ export default function DataPreviewTable({ records, onChange, existingCodes }: D
     if (e.key === 'Enter') {
       e.preventDefault();
       handleCellSave();
-      // 移到下一行同列
       if (rowIndex < records.length - 1) {
         handleCellClick(rowIndex + 1, field);
       }
@@ -63,14 +71,12 @@ export default function DataPreviewTable({ records, onChange, existingCodes }: D
       handleCellSave();
       const colIndex = COLUMNS.indexOf(field);
       if (e.shiftKey) {
-        // 移到上一列
         if (colIndex > 0) {
           handleCellClick(rowIndex, COLUMNS[colIndex - 1]);
         } else if (rowIndex > 0) {
           handleCellClick(rowIndex - 1, COLUMNS[COLUMNS.length - 1]);
         }
       } else {
-        // 移到下一列
         if (colIndex < COLUMNS.length - 1) {
           handleCellClick(rowIndex, COLUMNS[colIndex + 1]);
         } else if (rowIndex < records.length - 1) {
@@ -111,6 +117,92 @@ export default function DataPreviewTable({ records, onChange, existingCodes }: D
     return '';
   };
 
+  const useVirtual = records.length > VIRTUAL_THRESHOLD;
+  const tableHeight = Math.min(records.length * ROW_HEIGHT, window.innerHeight * 0.55);
+
+  // 渲染单行（用于虚拟列表）
+  const renderRow = useCallback(({ index, style }: { index: number; style: React.CSSProperties }) => {
+    const record = records[index];
+    const rowClass = getRowClass(record);
+
+    return (
+      <div
+        style={{
+          ...style,
+          display: 'flex',
+          alignItems: 'center',
+          background: rowClass === 'row-error' ? '#fff1f0' : rowClass === 'row-duplicate' ? '#fff7e8' : index % 2 === 0 ? '#fff' : '#fafbfc',
+          borderBottom: '1px solid #e5e6eb',
+          transition: 'background 0.15s',
+        }}
+        className="hover:bg-[#f7f8fa]"
+      >
+        {/* 行号 */}
+        <div style={{ width: 50, textAlign: 'center', color: '#86909c', fontSize: 13, flexShrink: 0 }}>
+          {index + 1}
+          {record._duplicateWith && (
+            <span className="tooltip ml-1 cursor-help" data-tooltip={record._duplicateWith}>⚠️</span>
+          )}
+        </div>
+        {/* 数据列 */}
+        {COLUMNS.map((field) => {
+          const isEditing = editCell?.row === index && editCell?.field === field;
+          const value = field === 'skuQuantity'
+            ? (record.skuQuantity ?? '')
+            : String((record as Record<string, unknown>)[field] ?? '');
+          const hasError = record._errors?.some(e => e.field === field);
+
+          return (
+            <div
+              key={`${index}-${field}`}
+              onClick={() => handleCellClick(index, field)}
+              style={{
+                cursor: 'pointer',
+                background: hasError ? '#fff1f0' : undefined,
+                minWidth: field === 'receiverAddress' || field === 'remark' ? 180 : 120,
+                flexShrink: 0,
+                padding: '4px 8px',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              {isEditing ? (
+                <input
+                  ref={inputRef}
+                  type={field === 'skuQuantity' ? 'number' : 'text'}
+                  value={editValue}
+                  onChange={(e) => setEditValue(e.target.value)}
+                  onBlur={handleCellSave}
+                  onKeyDown={(e) => handleKeyDown(e, index, field)}
+                  className="w-full px-1 py-0.5 border border-[#0fc6c2] rounded outline-none text-sm"
+                  style={{ minWidth: 80 }}
+                />
+              ) : (
+                <span style={{ color: hasError ? '#cf1322' : '#4e5969', fontSize: 14 }}>
+                  {value || (hasError ? <span style={{ color: '#cf1322', fontSize: 12 }}>(必填)</span> : '')}
+                </span>
+              )}
+            </div>
+          );
+        })}
+        {/* 操作列 */}
+        <div style={{ width: 80, textAlign: 'center', flexShrink: 0 }}>
+          <button
+            onClick={(e) => { e.stopPropagation(); handleDeleteRow(index); }}
+            className="btn btn-danger btn-sm"
+            title="删除行"
+          >
+            删除
+          </button>
+        </div>
+      </div>
+    );
+  }, [records, editCell, editValue, handleCellClick, handleCellSave, handleKeyDown, handleDeleteRow, getRowClass]);
+
+  // 锁定的表头宽度计算
+  const headerWidth = 50 + COLUMNS.reduce((sum, f) => sum + (f === 'receiverAddress' || f === 'remark' ? 180 : 120), 0) + 80;
+
   return (
     <>
       <div className="flex items-center justify-between px-4 py-3 border-b border-[#e5e6eb]">
@@ -126,6 +218,9 @@ export default function DataPreviewTable({ records, onChange, existingCodes }: D
               重复编码
             </span>
           )}
+          {useVirtual && (
+            <span className="tag tag-primary text-xs">虚拟列表优化</span>
+          )}
         </div>
         <div className="flex items-center gap-2">
           <button onClick={handleAddRow} className="btn btn-outline btn-sm">
@@ -137,77 +232,59 @@ export default function DataPreviewTable({ records, onChange, existingCodes }: D
         </div>
       </div>
 
-      <div className="table-wrapper" style={{ maxHeight: '60vh', overflow: 'auto' }}>
-        <table className="data-table">
-          <thead>
-            <tr>
-              <th style={{ width: 50, textAlign: 'center', position: 'sticky', top: 0, zIndex: 2, background: '#f7f8fa' }}>#</th>
-              {COLUMNS.map((field) => (
-                <th key={field} style={{ minWidth: field === 'receiverAddress' || field === 'remark' ? 180 : 120, position: 'sticky', top: 0, zIndex: 2, background: '#f7f8fa' }}>
-                  {ORDER_FIELD_LABELS[field]}
-                </th>
-              ))}
-              <th style={{ width: 80, textAlign: 'center', position: 'sticky', top: 0, zIndex: 2, background: '#f7f8fa' }}>操作</th>
-            </tr>
-          </thead>
-          <tbody>
-            {records.map((record, rowIndex) => (
-              <tr key={rowIndex} className={getRowClass(record)}>
-                <td style={{ textAlign: 'center', color: '#86909c', fontSize: 13 }}>
-                  {rowIndex + 1}
-                  {record._duplicateWith && (
-                    <span className="tooltip ml-1 cursor-help" data-tooltip={record._duplicateWith}>⚠️</span>
-                  )}
-                </td>
-                {COLUMNS.map((field) => {
-                  const isEditing = editCell?.row === rowIndex && editCell?.field === field;
-                  const value = field === 'skuQuantity'
-                    ? (record.skuQuantity || '')
-                    : String((record as Record<string, unknown>)[field] || '');
-                  const hasError = record._errors?.some(e => e.field === field);
+      {/* 固定表头 */}
+      <div style={{ overflowX: 'auto', minWidth: headerWidth }}>
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          background: '#f7f8fa',
+          borderBottom: '2px solid #e5e6eb',
+          fontWeight: 600,
+          fontSize: 13,
+          color: '#1d2129',
+          position: 'sticky',
+          top: 0,
+          zIndex: 2,
+          minWidth: headerWidth,
+        }}>
+          <div style={{ width: 50, textAlign: 'center', padding: '10px 4px', flexShrink: 0 }}>#</div>
+          {COLUMNS.map((field) => (
+            <div key={field} style={{
+              minWidth: field === 'receiverAddress' || field === 'remark' ? 180 : 120,
+              padding: '10px 8px',
+              flexShrink: 0,
+            }}>
+              {ORDER_FIELD_LABELS[field]}
+            </div>
+          ))}
+          <div style={{ width: 80, textAlign: 'center', padding: '10px 4px', flexShrink: 0 }}>操作</div>
+        </div>
 
-                  return (
-                    <td
-                      key={`${rowIndex}-${field}`}
-                      onClick={() => handleCellClick(rowIndex, field)}
-                      style={{
-                        cursor: 'pointer',
-                        background: hasError ? '#fff1f0' : undefined,
-                        minWidth: field === 'receiverAddress' || field === 'remark' ? 180 : 120,
-                      }}
-                    >
-                      {isEditing ? (
-                        <input
-                          autoFocus
-                          type={field === 'skuQuantity' ? 'number' : 'text'}
-                          value={editValue}
-                          onChange={(e) => setEditValue(e.target.value)}
-                          onBlur={handleCellSave}
-                          onKeyDown={(e) => handleKeyDown(e, rowIndex, field)}
-                          className="w-full px-1 py-0.5 border border-[#0fc6c2] rounded outline-none text-sm"
-                          style={{ minWidth: 100 }}
-                        />
-                      ) : (
-                        <span style={{ color: hasError ? '#cf1322' : undefined }}>
-                          {value || (hasError ? '(必填)' : '')}
-                        </span>
-                      )}
-                    </td>
-                  );
-                })}
-                <td style={{ textAlign: 'center' }}>
-                  <button
-                    onClick={(e) => { e.stopPropagation(); handleDeleteRow(rowIndex); }}
-                    className="btn btn-danger btn-sm"
-                    title="删除行"
-                  >
-                    删除
-                  </button>
-                </td>
-              </tr>
+        {/* 虚拟列表 or 普通列表 */}
+        {useVirtual ? (
+          <div style={{ minWidth: headerWidth }}>
+            <AutoSizer disableHeight>
+              {({ width }) => (
+                <List
+                  height={tableHeight}
+                  itemCount={records.length}
+                  itemSize={ROW_HEIGHT}
+                  width={Math.max(width, headerWidth)}
+                >
+                  {renderRow}
+                </List>
+              )}
+            </AutoSizer>
+          </div>
+        ) : (
+          <div style={{ maxHeight: '60vh', overflowY: 'auto', minWidth: headerWidth }}>
+            {records.map((record, idx) => (
+              <div key={idx} style={{ height: ROW_HEIGHT }}>
+                {renderRow({ index: idx, style: { height: ROW_HEIGHT, width: '100%' } })}
+              </div>
             ))}
-          </tbody>
-        </table>
+          </div>
+        )}
       </div>
 
       {records.length === 0 && (

@@ -8,8 +8,15 @@ export async function GET(req: Request) {
     const pageSize = parseInt(searchParams.get('pageSize') || '20');
     const externalCode = searchParams.get('externalCode') || undefined;
     const receiverName = searchParams.get('receiverName') || undefined;
+    const createdAtStart = searchParams.get('createdAtStart') || undefined;
+    const createdAtEnd = searchParams.get('createdAtEnd') || undefined;
 
-    const result = await getOrders(page, pageSize, { externalCode, receiverName });
+    const result = await getOrders(page, pageSize, {
+      externalCode,
+      receiverName,
+      createdAtStart,
+      createdAtEnd,
+    });
     return NextResponse.json(result);
   } catch (err) {
     return NextResponse.json({ error: `获取运单列表失败: ${err}` }, { status: 500 });

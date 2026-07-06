@@ -4,6 +4,7 @@ import { useEffect, useState, useCallback } from 'react';
 import toast from 'react-hot-toast';
 import { ParsedFileData, getPreviewForAI } from '@/lib/file-parsers';
 import { ParseRule, FileType } from '@/lib/types';
+import RuleEditorModal from '@/components/RuleEditorModal';
 
 interface RuleSelectorProps {
   parsedData: ParsedFileData;
@@ -22,9 +23,12 @@ export default function RuleSelector({ parsedData, onRuleSelected, selectedRule 
     error?: string;
   } | null>(null);
   const [showAiDetail, setShowAiDetail] = useState(false);
+  // AI 规则手动微调确认
+  const [showAiEditor, setShowAiEditor] = useState(false);
 
   useEffect(() => {
     loadRules();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const loadRules = async () => {
@@ -59,7 +63,7 @@ export default function RuleSelector({ parsedData, onRuleSelected, selectedRule 
         setAiResult({ rule: {}, analysis: '', confidence: {}, error: data.error || 'AI 生成失败' });
       } else {
         setAiResult(data);
-        toast.success('AI 已分析文件结构并生成推荐规则');
+        toast.success('AI 已分析文件结构并生成推荐规则，请检查并确认');
       }
     } catch (err) {
       setAiResult({ rule: {}, analysis: '', confidence: {}, error: `AI 请求失败: ${err}` });
@@ -68,24 +72,63 @@ export default function RuleSelector({ parsedData, onRuleSelected, selectedRule 
     }
   }, [parsedData]);
 
+  // 直接应用 AI 规则并解析
   const handleApplyAiRule = useCallback(async () => {
     if (!aiResult?.rule) return;
+
+    const toastId = toast.loading('正在保存并应用规则...');
     try {
       const res = await fetch('/api/rules', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(aiResult.rule),
+        body: JSON.stringify({
+          ...aiResult.rule,
+          isAiGenerated: true,
+          aiConfidence: aiResult.confidence || {},
+        }),
       });
+
+      // 先检查 HTTP 状态
+      if (!res.ok) {
+        let errMsg = `服务器错误 (${res.status})`;
+        try {
+          const errData = await res.json();
+          errMsg = errData.error || errMsg;
+        } catch { /* ignore parse error */ }
+        toast.error(`保存失败: ${errMsg}`, { id: toastId });
+        return;
+      }
+
       const data = await res.json();
-      if (data.rule) {
-        toast.success('AI 规则已保存');
+
+      if (data.rule && data.rule.id) {
+        toast.success('AI 规则已保存并应用，开始解析', { id: toastId });
         await loadRules();
         onRuleSelected(data.rule);
+      } else {
+        console.error('[handleApplyAiRule] API 返回格式异常:', data);
+        toast.error(`保存响应格式异常，请尝试"手动微调确认"`, { id: toastId });
       }
-    } catch {
-      toast.error('保存 AI 规则失败');
+    } catch (err) {
+      console.error('[handleApplyAiRule] 异常:', err);
+      toast.error(`操作失败: ${err instanceof Error ? err.message : '未知错误'}`, { id: toastId });
     }
   }, [aiResult, onRuleSelected]);
+
+  // 打开编辑器手动微调 AI 规则
+  const handleEditAiRule = useCallback(() => {
+    setShowAiEditor(true);
+  }, []);
+
+  // 编辑器保存回调（RuleEditorModal 内部已完成 API 调用）
+  const handleAiEditorSave = useCallback(async (savedRule: Partial<ParseRule>) => {
+    if (savedRule.id) {
+      toast.success('规则已保存，即将应用解析');
+      setShowAiEditor(false);
+      await loadRules();
+      onRuleSelected(savedRule as ParseRule);
+    }
+  }, [onRuleSelected]);
 
   const filteredRules = rules.filter(r => r.fileType === parsedData.fileType);
 
@@ -128,10 +171,14 @@ export default function RuleSelector({ parsedData, onRuleSelected, selectedRule 
               </div>
             ) : (
               <div>
+                {/* 置信度展示 */}
                 <div className="flex items-center gap-3 flex-wrap mb-3">
-                  <span className="tag tag-primary">
+                  <span className={`tag ${(aiResult.confidence?.overall || 0) >= 70 ? 'tag-primary' : (aiResult.confidence?.overall || 0) >= 50 ? 'tag-warning' : 'tag-danger'}`}>
                     整体置信度: {aiResult.confidence?.overall || '--'}%
                   </span>
+                  {aiResult.confidence?.overall != null && aiResult.confidence.overall < 70 && (
+                    <span className="text-xs text-[#d97b00]">⚠️ 部分映射为AI推测，建议手动确认</span>
+                  )}
                   <button
                     onClick={() => setShowAiDetail(!showAiDetail)}
                     className="text-sm text-[#0fc6c2] hover:underline"
@@ -148,23 +195,58 @@ export default function RuleSelector({ parsedData, onRuleSelected, selectedRule 
                     {aiResult.confidence && (
                       <>
                         <br /><br />
-                        <strong>字段置信度:</strong>
+                        <strong className="text-[#1d2129]">字段置信度（低于70%为推测值）:</strong>
                         <br />
-                        {Object.entries(aiResult.confidence)
-                          .filter(([k]) => k !== 'overall')
-                          .map(([k, v]) => (
-                            <span key={k} className="tag tag-warning mr-1 mb-1">
-                              {k}: {v}%
-                            </span>
-                          ))}
+                        <div className="flex flex-wrap gap-1 mt-1">
+                          {Object.entries(aiResult.confidence)
+                            .filter(([k]) => k !== 'overall')
+                            .map(([k, v]) => (
+                              <span key={k} className={`tag ${v >= 70 ? 'tag-primary' : v >= 50 ? 'tag-warning' : 'tag-danger'} mr-1 mb-1`}>
+                                {k}: {v}%
+                                {v < 70 && ' ⚠推测'}
+                              </span>
+                            ))}
+                        </div>
                       </>
+                    )}
+                    {/* 推断字段说明 */}
+                    {aiResult.rule?.columnMappings && aiResult.rule.columnMappings.some((m: any) => {
+                      const fieldConf = aiResult.confidence?.[m.targetField];
+                      return fieldConf != null && fieldConf < 70;
+                    }) && (
+                      <div className="mt-3 p-2 bg-[#fff7e8] rounded-lg border border-[#ffe4ba]">
+                        <strong className="text-[#d97b00]">⚠️ AI 推测字段：</strong>
+                        <br />
+                        <span className="text-[#d97b00]">
+                          {aiResult.rule.columnMappings
+                            .filter((m: any) => (aiResult.confidence?.[m.targetField] || 100) < 70)
+                            .map((m: any) => {
+                              const labels: Record<string, string> = {
+                                externalCode: '外部编码', storeName: '收货门店', receiverName: '收件人姓名',
+                                receiverPhone: '收件人电话', receiverAddress: '收件人地址', skuCode: 'SKU编码',
+                                skuName: 'SKU名称', skuQuantity: 'SKU数量', skuSpec: 'SKU规格', remark: '备注',
+                              };
+                              return `${labels[m.targetField] || m.targetField}（置信度 ${aiResult.confidence?.[m.targetField] || '?'}%）`;
+                            })
+                            .join('、')
+                          }
+                          <br />
+                          以上字段由AI推测，建议点击"手动微调确认"进行检查
+                        </span>
+                      </div>
                     )}
                   </div>
                 )}
 
-                <div className="flex items-center gap-2">
-                  <button onClick={handleApplyAiRule} className="btn btn-primary btn-sm">
-                    ✅ 应用 AI 规则并解析
+                <div className="flex items-center gap-2 flex-wrap">
+                  <button
+                    onClick={handleEditAiRule}
+                    className="btn btn-primary btn-sm"
+                  >
+                    🔧 手动微调确认
+                  </button>
+                  <button onClick={handleApplyAiRule} className="btn btn-outline btn-sm">
+                    ✅ 直接应用
                   </button>
                   <button
                     onClick={() => { setAiResult(null); }}
@@ -221,7 +303,12 @@ export default function RuleSelector({ parsedData, onRuleSelected, selectedRule 
                   <div>
                     <span className="font-semibold text-[#1d2129]">{rule.name}</span>
                     <span className="tag tag-primary ml-2">{rule.fileType.toUpperCase()}</span>
-                    {rule.isAiGenerated && <span className="tag tag-info ml-1">AI生成</span>}
+                    {rule.isAiGenerated && (
+                      <span className="tag tag-info ml-1">AI生成</span>
+                    )}
+                    {rule.isAiGenerated && rule.aiConfidence?.overall != null && rule.aiConfidence.overall < 70 && (
+                      <span className="tag tag-warning ml-1">⚠低置信度</span>
+                    )}
                   </div>
                   <span className="text-xs text-[#86909c]">
                     {new Date(rule.updatedAt).toLocaleDateString()}
@@ -236,12 +323,29 @@ export default function RuleSelector({ parsedData, onRuleSelected, selectedRule 
                   <span>{rule.columnMappings.length} 个字段映射</span>
                   <span>·</span>
                   <span>{rule.processors.filter(p => p.enabled).length} 个处理器</span>
+                  {rule.aiConfidence?.overall != null && (
+                    <>
+                      <span>·</span>
+                      <span className={rule.aiConfidence.overall >= 70 ? 'text-[#0fc6c2]' : 'text-[#d97b00]'}>
+                        AI置信度 {rule.aiConfidence.overall}%
+                      </span>
+                    </>
+                  )}
                 </div>
               </div>
             ))}
           </div>
         )}
       </div>
+
+      {/* AI 规则编辑器弹窗（手动微调确认） */}
+      {showAiEditor && aiResult?.rule && (
+        <RuleEditorModal
+          rule={aiResult.rule as ParseRule}
+          onSave={handleAiEditorSave}
+          onClose={() => setShowAiEditor(false)}
+        />
+      )}
     </div>
   );
 }

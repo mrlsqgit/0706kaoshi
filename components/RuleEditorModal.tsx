@@ -54,8 +54,6 @@ const COLUMN_MAPPING_FIELDS: OrderField[] = [
 export default function RuleEditorModal({ rule, onSave, onClose }: RuleEditorModalProps) {
   const [form, setForm] = useState<Partial<ParseRule>>(rule || DEFAULT_RULE);
   const [activeTab, setActiveTab] = useState<'basic' | 'mappings' | 'processors' | 'test'>('basic');
-
-  // 测试解析相关
   const [testFile, setTestFile] = useState<File | null>(null);
   const [testLoading, setTestLoading] = useState(false);
   const [testRecords, setTestRecords] = useState<OrderRecord[]>([]);
@@ -70,7 +68,6 @@ export default function RuleEditorModal({ rule, onSave, onClose }: RuleEditorMod
     setForm(prev => ({ ...prev, [key]: value }));
   };
 
-  // ====== 列映射管理 ======
   const addMapping = () => {
     const mappings = [...(form.columnMappings || [])];
     mappings.push({
@@ -92,7 +89,6 @@ export default function RuleEditorModal({ rule, onSave, onClose }: RuleEditorMod
     updateField('columnMappings', mappings);
   };
 
-  // ====== 处理器管理 ======
   const addProcessor = (type: ProcessorType) => {
     const processors = [...(form.processors || [])];
     let defaultOptions: Record<string, unknown> = {};
@@ -140,7 +136,6 @@ export default function RuleEditorModal({ rule, onSave, onClose }: RuleEditorMod
     updateField('processors', processors);
   };
 
-  // ====== 测试解析 ======
   const handleTestFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
@@ -155,7 +150,6 @@ export default function RuleEditorModal({ rule, onSave, onClose }: RuleEditorMod
     setTestLoading(true);
     setTestRecords([]);
     try {
-      // 构建完整的 ParseRule
       const testRule: ParseRule = {
         ...DEFAULT_RULE,
         ...form,
@@ -165,7 +159,6 @@ export default function RuleEditorModal({ rule, onSave, onClose }: RuleEditorMod
       } as ParseRule;
 
       const parsedData = await parseFile(testFile);
-
       const allRecords: Omit<OrderRecord, 'id' | 'batchId' | 'createdAt' | '_rowIndex' | '_errors' | '_duplicateWith'>[] = [];
 
       for (const sheet of parsedData.sheets) {
@@ -178,7 +171,6 @@ export default function RuleEditorModal({ rule, onSave, onClose }: RuleEditorMod
         allRecords.push(...parsed);
       }
 
-      // 校验
       const validated = validateRecords(
         allRecords.map((r, i) => ({ ...r, _rowIndex: i, _errors: [], _duplicateWith: undefined })) as OrderRecord[]
       );
@@ -195,7 +187,6 @@ export default function RuleEditorModal({ rule, onSave, onClose }: RuleEditorMod
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
       <div className="card animate-fadeIn w-full max-w-3xl max-h-[90vh] flex flex-col mx-4">
-        {/* Header */}
         <div className="flex items-center justify-between pb-4 border-b border-[#e5e6eb]">
           <h2 className="text-xl font-bold text-[#1d2129]">
             {rule ? '编辑规则' : '新建规则'}
@@ -205,7 +196,6 @@ export default function RuleEditorModal({ rule, onSave, onClose }: RuleEditorMod
           </button>
         </div>
 
-        {/* Tabs */}
         <div className="flex gap-1 pt-4 pb-2 border-b border-[#e5e6eb]">
           {[
             { key: 'basic' as const, label: '基本信息' },
@@ -227,9 +217,7 @@ export default function RuleEditorModal({ rule, onSave, onClose }: RuleEditorMod
           ))}
         </div>
 
-        {/* Body */}
         <div className="flex-1 overflow-y-auto py-4 space-y-4">
-          {/* 基本信息 */}
           {activeTab === 'basic' && (
             <div className="space-y-4">
               <div>
@@ -344,7 +332,6 @@ export default function RuleEditorModal({ rule, onSave, onClose }: RuleEditorMod
             </div>
           )}
 
-          {/* 字段映射 */}
           {activeTab === 'mappings' && (
             <div className="space-y-4">
               <div className="flex items-center justify-between">
@@ -435,7 +422,6 @@ export default function RuleEditorModal({ rule, onSave, onClose }: RuleEditorMod
             </div>
           )}
 
-          {/* 处理器 */}
           {activeTab === 'processors' && (
             <div className="space-y-4">
               <div className="flex items-center gap-2 flex-wrap">
@@ -546,7 +532,7 @@ export default function RuleEditorModal({ rule, onSave, onClose }: RuleEditorMod
                                   value={String((proc.options as Record<string, unknown>).cellSplitSeparator || '')}
                                   onChange={e => updateProcessorOptions(idx, { ...proc.options, cellSplitSeparator: e.target.value })}
                                   className="form-input text-sm"
-                                  placeholder="例如 \\n (换行)"
+                                  placeholder="例如 \n (换行)"
                                 />
                               </div>
                             </div>
@@ -618,9 +604,7 @@ export default function RuleEditorModal({ rule, onSave, onClose }: RuleEditorMod
               )}
             </div>
           )}
-        </div>
 
-          {/* 测试解析 */}
           {activeTab === 'test' && (
             <div className="space-y-4">
               <p className="text-sm text-[#86909c]">上传一个样例文件，用当前规则试解析，实时查看结果</p>
@@ -709,14 +693,43 @@ export default function RuleEditorModal({ rule, onSave, onClose }: RuleEditorMod
               )}
             </div>
           )}
-
         </div>
 
-        {/* Footer */}
         <div className="flex items-center justify-end gap-2 pt-4 border-t border-[#e5e6eb]">
           <button onClick={onClose} className="btn btn-outline">取消</button>
           <button
-            onClick={() => onSave(form)}
+            onClick={async () => {
+              if (!form.name) {
+                toast.error('请输入规则名称');
+                return;
+              }
+              // 保存中状态提示
+              const toastId = toast.loading('正在保存规则...');
+              try {
+                const isEdit = !!(rule?.id);
+                const url = isEdit ? '/api/rules' : '/api/rules';
+                const method = isEdit ? 'PUT' : 'POST';
+                const body = isEdit
+                  ? { ...form, id: rule!.id }
+                  : { ...form, isAiGenerated: rule?.isAiGenerated ?? false, aiConfidence: rule?.aiConfidence || {} };
+
+                const res = await fetch(url, {
+                  method,
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify(body),
+                });
+                const data = await res.json();
+
+                if (data.rule) {
+                  toast.success(isEdit ? '规则更新成功' : '规则创建成功', { id: toastId });
+                  onSave(data.rule);
+                } else {
+                  toast.error(data.error || '保存失败', { id: toastId });
+                }
+              } catch (err) {
+                toast.error(`保存规则失败: ${err instanceof Error ? err.message : '未知错误'}`, { id: toastId });
+              }
+            }}
             disabled={!form.name}
             className="btn btn-primary"
           >
