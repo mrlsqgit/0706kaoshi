@@ -108,8 +108,8 @@ export default function HomePage() {
       let validated = validateRecords(allRecords);
 
       // 重复检测
-      const { default: db } = await import('@/lib/db');
-      const existingCodes = await db.getAllExternalCodes();
+      const { getAllExternalCodes } = await import('@/lib/db');
+      const existingCodes = await getAllExternalCodes();
       validated = checkDuplicates(validated, existingCodes);
 
       // 添加行号
