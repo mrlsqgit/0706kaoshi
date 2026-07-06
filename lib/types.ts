@@ -17,6 +17,8 @@ export interface OrderRecord {
   _rowIndex?: number;
   _errors?: ValidationError[];
   _duplicateWith?: string;
+  // 允许按字段名动态取值
+  [key: string]: unknown;
 }
 
 export interface ValidationError {

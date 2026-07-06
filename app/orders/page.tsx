@@ -143,9 +143,7 @@ export default function OrdersPage() {
                       {DISPLAY_COLUMNS.map(field => (
                         <td key={field}>
                           <span className="text-sm">
-                            {field === 'skuQuantity'
-                              ? order.skuQuantity
-                              : String((order as Record<string, unknown>)[field] || '')}
+                            {String((order as unknown as Record<string, unknown>)[field] || '')}
                           </span>
                         </td>
                       ))}
