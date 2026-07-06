@@ -153,6 +153,13 @@ export interface CardDetectionOptions {
   }[];
 }
 
+// 复合单元格拆分配置（周配送计划等）
+export interface CompositeCellSplitOptions {
+  cellSeparator: string;     // 单元格内分隔符，如 "\\n" 或 "__|__"
+  nameQtyPattern: string;    // "物品名x数量" 匹配模式，如 "(.+?)[xX×](\\d+)"
+  skipFields: OrderField[];  // 拆分后从新行复制的字段
+}
+
 // 文本解析配置（Word/PDF 纯文本）
 export interface TextParsingOptions {
   recordSeparator: string;

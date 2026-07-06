@@ -2,7 +2,7 @@
 
 import { useState, useCallback, useRef } from 'react';
 import toast from 'react-hot-toast';
-import { parseFile, ParsedFileData, getPreviewForAI } from '@/lib/file-parsers';
+import { parseFile, ParsedFileData } from '@/lib/file-parsers';
 import { executeParse, validateRecords, checkDuplicates } from '@/lib/rule-engine';
 import { ParseRule, OrderRecord, ParseResult } from '@/lib/types';
 import DataPreviewTable from '@/components/DataPreviewTable';
@@ -20,9 +20,12 @@ export default function HomePage() {
   const [selectedRule, setSelectedRule] = useState<ParseRule | null>(null);
   const [isParsing, setIsParsing] = useState(false);
   const [parseProgress, setParseProgress] = useState(0);
+  const [parseProgressText, setParseProgressText] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [submitResult, setSubmitResult] = useState<{ success: number; total: number } | null>(null);
+  const [submitProgress, setSubmitProgress] = useState(0);
+  const [submitResult, setSubmitResult] = useState<{ success: number; total: number; errors?: string[] } | null>(null);
   const [dragActive, setDragActive] = useState(false);
+  const [existingCodes, setExistingCodes] = useState<Set<string>>(new Set());
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // ====== 文件处理 ======
@@ -32,12 +35,25 @@ export default function HomePage() {
       toast.error('不支持的文件格式，请上传 Excel / Word / PDF 文件');
       return;
     }
+    if (f.size === 0) {
+      toast.error('文件为空，请检查文件内容');
+      return;
+    }
     setFile(f);
     setIsParsing(true);
-    setParseProgress(10);
+    setParseProgress(5);
+    setParseProgressText('正在读取文件...');
     try {
       const data = await parseFile(f);
       setParseProgress(50);
+      setParseProgressText(`解析完成: ${data.metadata.rowCount} 行, ${data.metadata.sheetCount} 个 Sheet`);
+      if (data.metadata.rowCount === 0) {
+        toast.error('文件中没有可解析的数据行，请检查文件内容');
+        setIsParsing(false);
+        setParseProgress(0);
+        setParseProgressText('');
+        return;
+      }
       setParsedData(data);
       setParseProgress(100);
       setStep('selectRule');
@@ -46,7 +62,7 @@ export default function HomePage() {
       toast.error(`文件解析失败: ${err instanceof Error ? err.message : '未知错误'}`);
     } finally {
       setIsParsing(false);
-      setParseProgress(0);
+      setTimeout(() => { setParseProgress(0); setParseProgressText(''); }, 500);
     }
   }, []);
 
@@ -68,13 +84,9 @@ export default function HomePage() {
     setSelectedRule(rule);
     setIsParsing(true);
     setParseProgress(0);
+    setParseProgressText('开始解析...');
 
     try {
-      // 模拟解析进度
-      const progressInterval = setInterval(() => {
-        setParseProgress((p) => Math.min(p + 15, 90));
-      }, 200);
-
       let allRecords: OrderRecord[] = [];
 
       // 对于 Excel，逐 Sheet 解析
@@ -83,34 +95,40 @@ export default function HomePage() {
           ? parsedData.sheets.filter(s => rule.sheetNames.includes(s.sheetName))
           : parsedData.sheets;
 
-        for (const sheet of sheetsToProcess) {
+        const totalSheets = sheetsToProcess.length;
+        for (let si = 0; si < totalSheets; si++) {
+          const sheet = sheetsToProcess[si];
           const parsed = executeParse(sheet.rows, sheet.headers, rule);
           allRecords.push(...parsed);
+          setParseProgress(Math.round(((si + 1) / totalSheets) * 70));
+          setParseProgressText(`处理 Sheet ${si + 1}/${totalSheets}: ${sheet.sheetName} → ${parsed.length} 条`);
         }
       } else {
         // Word / PDF 使用第一个 Sheet
         const sheet = parsedData.sheets[0];
         if (sheet) {
-          // 对于 Word/PDF，尝试文本解析
           if (parsedData.rawText) {
-            const parsed = executeParse(sheet.rows, sheet.headers, rule, parsedData.rawText);
-            allRecords = parsed;
+            allRecords = executeParse(sheet.rows, sheet.headers, rule, parsedData.rawText);
           } else {
-            const parsed = executeParse(sheet.rows, sheet.headers, rule);
-            allRecords = parsed;
+            allRecords = executeParse(sheet.rows, sheet.headers, rule);
           }
+          setParseProgress(70);
+          setParseProgressText(`文本解析完成 → ${allRecords.length} 条`);
         }
       }
 
-      clearInterval(progressInterval);
-
       // 校验
+      setParseProgress(80);
+      setParseProgressText('执行数据校验...');
       let validated = validateRecords(allRecords);
 
       // 重复检测
+      setParseProgress(90);
+      setParseProgressText('检测重复编码...');
       const { getAllExternalCodes } = await import('@/lib/db');
-      const existingCodes = await getAllExternalCodes();
-      validated = checkDuplicates(validated, existingCodes);
+      const codes = await getAllExternalCodes();
+      setExistingCodes(codes);
+      validated = checkDuplicates(validated, codes);
 
       // 添加行号
       validated = validated.map((r, i) => ({ ...r, _rowIndex: i }));
@@ -124,11 +142,15 @@ export default function HomePage() {
       });
 
       const errorCount = validated.filter(r => (r._errors?.length || 0) > 0).length;
+      const dupCount = validated.filter(r => r._duplicateWith).length;
       setParseProgress(100);
+      setParseProgressText('');
       setStep('preview');
 
       if (errorCount > 0) {
         toast(`${validated.length} 条记录，${errorCount} 条有校验错误`, { icon: '⚠️' });
+      } else if (dupCount > 0) {
+        toast(`${validated.length} 条记录，${dupCount} 条存在重复`, { icon: '⚠️' });
       } else {
         toast.success(`解析成功，共 ${validated.length} 条记录`);
       }
@@ -177,18 +199,33 @@ export default function HomePage() {
     }
 
     setIsSubmitting(true);
+    setSubmitProgress(10);
     try {
+      setSubmitProgress(30);
       const response = await fetch('/api/orders', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ orders: records }),
       });
 
+      setSubmitProgress(80);
       const result = await response.json();
 
+      setSubmitProgress(100);
+
       if (!response.ok) {
+        // 409 部分重复，返回了部分成功信息
         if (response.status === 409) {
-          toast.error('存在重复的外部编码，请检查');
+          setSubmitResult({
+            success: result.successCount || 0,
+            total: result.totalCount || records.length,
+            errors: result.duplicates ? result.duplicates.map((d: string) => `重复编码: ${d}`) : [],
+          });
+          setStep('submitted');
+          const failCount = (result.totalCount || 0) - (result.successCount || 0);
+          if (failCount > 0) {
+            toast(`提交完成: ${result.successCount} 成功, ${failCount} 因重复跳过`, { icon: '⚠️' });
+          }
           return;
         }
         toast.error(result.error || '提交失败');
@@ -202,6 +239,7 @@ export default function HomePage() {
       toast.error('提交失败，请重试');
     } finally {
       setIsSubmitting(false);
+      setSubmitProgress(0);
     }
   }, [records]);
 
@@ -255,10 +293,13 @@ export default function HomePage() {
           {isParsing ? (
             <div className="py-16 text-center">
               <div className="animate-spin inline-block w-10 h-10 border-3 border-[#e5e6eb] border-t-[#0fc6c2] rounded-full mb-4" />
-              <p className="text-[#4e5969]">正在解析文件...</p>
+              <p className="text-[#4e5969]">{parseProgressText || '正在解析文件...'}</p>
               <div className="mt-4 max-w-sm mx-auto">
                 <ProgressBar percent={parseProgress} />
               </div>
+              {parseProgressText && (
+                <p className="text-xs text-[#86909c] mt-2">进度: {parseProgress}%</p>
+              )}
             </div>
           ) : (
             <div
@@ -334,20 +375,21 @@ export default function HomePage() {
               <button onClick={handleReupload} className="btn btn-outline btn-sm">
                 重新上传
               </button>
-              <button
-                onClick={handleSubmit}
-                disabled={isSubmitting || hasErrors}
-                className="btn btn-primary"
-              >
-                {isSubmitting ? (
-                  <>
-                    <span className="animate-spin inline-block w-4 h-4 border-2 border-white/30 border-t-white rounded-full" />
-                    提交中...
-                  </>
-                ) : (
-                  '提交下单'
+              <div className="flex items-center gap-3">
+                {isSubmitting && (
+                  <div className="flex items-center gap-2">
+                    <span className="animate-spin inline-block w-4 h-4 border-2 border-[#0fc6c2]/30 border-t-[#0fc6c2] rounded-full" />
+                    <span className="text-sm text-[#0fc6c2] font-medium">提交中 {submitProgress}%</span>
+                  </div>
                 )}
-              </button>
+                <button
+                  onClick={handleSubmit}
+                  disabled={isSubmitting || hasErrors}
+                  className="btn btn-primary"
+                >
+                  {isSubmitting ? '提交中...' : '提交下单'}
+                </button>
+              </div>
             </div>
           </div>
 
@@ -371,6 +413,7 @@ export default function HomePage() {
             <DataPreviewTable
               records={records}
               onChange={handleRecordsChange}
+              existingCodes={existingCodes}
             />
           </div>
         </div>
@@ -383,10 +426,17 @@ export default function HomePage() {
           <h2 className="text-2xl font-bold text-[#1d2129] mb-2">提交成功！</h2>
           <p className="text-[#4e5969] mb-6">
             成功提交 <span className="text-[#0fc6c2] font-bold text-lg">{submitResult.success}</span> 条运单
-            {submitResult.success < submitResult.total && (
-              <span className="text-[#cf1322]">，{submitResult.total - submitResult.success} 条失败</span>
+            {submitResult.success < (submitResult.total || submitResult.success) && (
+              <span className="text-[#cf1322]">，{(submitResult.total || 0) - submitResult.success} 条失败</span>
             )}
           </p>
+          {submitResult.errors && submitResult.errors.length > 0 && (
+            <div className="max-w-md mx-auto mb-4 p-3 text-left text-sm text-[#cf1322] bg-[#fff1f0] rounded-lg border border-[#ffccc7]">
+              {submitResult.errors.map((e, i) => (
+                <div key={i}>⚠️ {e}</div>
+              ))}
+            </div>
+          )}
           <div className="flex items-center justify-center gap-3">
             <button onClick={handleReupload} className="btn btn-primary btn-lg">
               导入新文件

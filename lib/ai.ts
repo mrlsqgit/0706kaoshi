@@ -123,9 +123,21 @@ ${previewStr.slice(0, 8000)}
       ],
       temperature: 0.3,
       max_tokens: 4096,
+      timeout: 30_000, // 30 秒超时
     });
 
     const content = response.choices[0]?.message?.content || '';
+    
+    if (!content.trim()) {
+      return {
+        rule: {},
+        analysis: '',
+        confidence: {},
+        error: 'AI 返回内容为空，请检查模型名称和 API Key 是否有效',
+      };
+    }
+
+    console.log('AI raw response:', content.slice(0, 500));
     
     // 提取 JSON
     let jsonStr = content;

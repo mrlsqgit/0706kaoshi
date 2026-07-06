@@ -13,6 +13,7 @@ import {
   CardDetectionOptions,
   TextParsingOptions,
   MultiOrderSplitOptions,
+  CompositeCellSplitOptions,
 } from './types';
 
 // ====== 工具函数 ======
@@ -311,7 +312,7 @@ function processCardDetection(
   return { records: cards, cardInfos };
 }
 
-/** 文本解析 */
+/** 文本解析（Word/PDF 纯文本） */
 function processTextParsing(
   text: string,
   options: TextParsingOptions
@@ -339,6 +340,82 @@ function processTextParsing(
   return records;
 }
 
+/** 复合单元格拆分（周配送计划：一个单元格内 "物品名x数量\n物品名x数量" 需要拆成多行） */
+function processCompositeCellSplit(
+  records: Omit<OrderRecord, 'id' | 'batchId' | 'createdAt' | '_rowIndex' | '_errors' | '_duplicateWith'>[],
+  options: CompositeCellSplitOptions
+): typeof records {
+  const result: typeof records = [];
+
+  for (const record of records) {
+    const recordObj = record as Record<string, unknown>;
+    // 收集所有可能需要拆分的字段
+    const fieldValues: Record<string, string> = {};
+    Object.keys(recordObj).forEach(key => {
+      fieldValues[key] = String(recordObj[key] ?? '');
+    });
+
+    // 检查是否有包含分隔符的字段
+    let maxItems = 1;
+    const splitFields: Record<string, string[]> = {};
+    let fieldToSplit = '';
+
+    for (const [key, value] of Object.entries(fieldValues)) {
+      if (!options.skipFields.includes(key as OrderField) && value) {
+        const parts = value.split(new RegExp(options.cellSeparator)).filter(s => s.trim());
+        if (parts.length > maxItems) {
+          maxItems = parts.length;
+          fieldToSplit = key;
+        }
+        splitFields[key] = parts;
+      } else {
+        splitFields[key] = [value];
+      }
+    }
+
+    if (maxItems <= 1) {
+      result.push(record);
+      continue;
+    }
+
+    // 展开拆分的字段为多行
+    const splitValues = splitFields[fieldToSplit] || [];
+    for (let i = 0; i < splitValues.length; i++) {
+      const newRecord: Record<string, unknown> = {};
+      for (const [key, values] of Object.entries(splitFields)) {
+        if (key === fieldToSplit) {
+          const item = splitValues[i].trim();
+          // 尝试解析 "名称X数量" 格式
+          const qtyMatch = item.match(new RegExp(options.nameQtyPattern));
+          if (qtyMatch) {
+            newRecord[key] = qtyMatch[1]?.trim() || item;
+            newRecord.skuQuantity = parseInt(qtyMatch[2], 10) || 1;
+          } else {
+            newRecord[key] = item;
+          }
+        } else if (options.skipFields.includes(key as OrderField)) {
+          // skipFields 中的字段从原行复制
+          newRecord[key] = recordObj[key];
+        } else {
+          newRecord[key] = values[i] ?? values[0] ?? '';
+        }
+      }
+      result.push(newRecord as unknown as typeof record);
+    }
+  }
+
+  return result;
+}
+
+/** 多订单拆分（一个 PDF 含多个独立配送单） */
+function processMultiOrderSplit(
+  rawText: string,
+  options: MultiOrderSplitOptions
+): string[] {
+  const parts = rawText.split(new RegExp(options.orderSeparator)).filter(s => s.trim());
+  return parts.map(part => part.trim());
+}
+
 // ====== 主解析函数 ======
 
 export function executeParse(
@@ -356,6 +433,42 @@ export function executeParse(
 
   // 2. 跳过汇总/空行
   rows = skipSummaryAndEmpty(rows, rule);
+
+  // 2b. 多订单拆分（在处理前将 rawText 拆为多份）
+  if (rawText) {
+    const multiOrderProc = rule.processors.find(
+      p => p.enabled && p.type === 'multiOrderSplit'
+    );
+    if (multiOrderProc) {
+      const opts = multiOrderProc.options as unknown as MultiOrderSplitOptions;
+      const orderTexts = processMultiOrderSplit(rawText, opts);
+      // 对每份订单文本使用 textParsing 或逐份解析
+      const textProc = rule.processors.find(
+        p => p.enabled && p.type === 'textParsing'
+      );
+      if (textProc) {
+        const textOpts = textProc.options as unknown as TextParsingOptions;
+        const allRecords: Omit<OrderRecord, 'id' | 'batchId' | 'createdAt' | '_rowIndex' | '_errors' | '_duplicateWith'>[] = [];
+        for (const orderText of orderTexts) {
+          const parsed = processTextParsing(orderText, textOpts);
+          allRecords.push(...parsed as unknown as Omit<OrderRecord, 'id' | 'batchId' | 'createdAt' | '_rowIndex' | '_errors' | '_duplicateWith'>[]);
+        }
+        return allRecords;
+      }
+    }
+  }
+
+  // 2c. 纯文本解析（Word/PDF 单订单场景）
+  if (rawText) {
+    const textProc = rule.processors.find(
+      p => p.enabled && p.type === 'textParsing'
+    );
+    if (textProc) {
+      const opts = textProc.options as unknown as TextParsingOptions;
+      const parsed = processTextParsing(rawText, opts);
+      return parsed as unknown as Omit<OrderRecord, 'id' | 'batchId' | 'createdAt' | '_rowIndex' | '_errors' | '_duplicateWith'>[];
+    }
+  }
 
   // 3. 执行处理器
   let needsCardMode = false;
@@ -394,6 +507,16 @@ export function executeParse(
             processedRecords.push(merged);
           }
         }
+        break;
+      }
+
+      case 'compositeCellSplit': {
+        // 在列映射后执行拆分
+        if (processedRecords.length === 0) {
+          processedRecords = applyColumnMappings(rows, rule.columnMappings, headers);
+        }
+        const opts = proc.options as unknown as CompositeCellSplitOptions;
+        processedRecords = processCompositeCellSplit(processedRecords, opts);
         break;
       }
     }

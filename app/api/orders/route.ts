@@ -32,17 +32,30 @@ export async function POST(req: Request) {
     const duplicates = await checkDuplicateExternalCodes(codes);
 
     if (duplicates.length > 0) {
-      return NextResponse.json(
-        {
-          error: '存在重复的外部编码',
-          duplicates,
-          canForceSubmit: true,
-        },
-        { status: 409 }
+      const dupSet = new Set(duplicates);
+      // 过滤掉重复的，只提交不重复的
+      const validOrders = orders.filter(
+        (o) => !dupSet.has(String(o.externalCode || ''))
       );
+
+      if (validOrders.length === 0) {
+        return NextResponse.json(
+          { error: '所有运单编码均已存在', duplicates, canForceSubmit: true, totalCount: orders.length, successCount: 0 },
+          { status: 409 }
+        );
+      }
+
+      const created = await createOrders(validOrders as any);
+      return NextResponse.json({
+        success: created.length > 0,
+        totalCount: orders.length,
+        successCount: created.length,
+        failCount: orders.length - created.length,
+        duplicates,
+      }, { status: 409 });
     }
 
-    const created = await createOrders(orders as any);
+    const created = await createOrders(orders as unknown[]);
     return NextResponse.json({
       success: true,
       totalCount: orders.length,

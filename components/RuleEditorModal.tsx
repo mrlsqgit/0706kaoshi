@@ -1,6 +1,7 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
+import toast from 'react-hot-toast';
 import {
   ParseRule,
   FileType,
@@ -10,7 +11,10 @@ import {
   ORDER_FIELD_LABELS,
   SourceType,
   ProcessorType,
+  OrderRecord,
 } from '@/lib/types';
+import { executeParse, validateRecords } from '@/lib/rule-engine';
+import { parseFile } from '@/lib/file-parsers';
 
 interface RuleEditorModalProps {
   rule: ParseRule | null;
@@ -49,7 +53,14 @@ const COLUMN_MAPPING_FIELDS: OrderField[] = [
 
 export default function RuleEditorModal({ rule, onSave, onClose }: RuleEditorModalProps) {
   const [form, setForm] = useState<Partial<ParseRule>>(rule || DEFAULT_RULE);
-  const [activeTab, setActiveTab] = useState<'basic' | 'mappings' | 'processors'>('basic');
+  const [activeTab, setActiveTab] = useState<'basic' | 'mappings' | 'processors' | 'test'>('basic');
+
+  // 测试解析相关
+  const [testFile, setTestFile] = useState<File | null>(null);
+  const [testLoading, setTestLoading] = useState(false);
+  const [testRecords, setTestRecords] = useState<OrderRecord[]>([]);
+  const [testFileName, setTestFileName] = useState('');
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (rule) setForm(rule);
@@ -98,6 +109,15 @@ export default function RuleEditorModal({ rule, onSave, onClose }: RuleEditorMod
       case 'cardDetection':
         defaultOptions = { cardStartKeyword: '▶', internalFieldPatterns: [] };
         break;
+      case 'compositeCellSplit':
+        defaultOptions = { cellSeparator: '\\n', nameQtyPattern: '(.+?)[xX×](\\d+)', skipFields: ['storeName', 'externalCode'] };
+        break;
+      case 'multiOrderSplit':
+        defaultOptions = { orderSeparator: '---+' };
+        break;
+      case 'textParsing':
+        defaultOptions = { recordSeparator: '---+', fieldPatterns: [] };
+        break;
     }
     processors.push({ type, enabled: true, options: defaultOptions });
     updateField('processors', processors);
@@ -120,6 +140,58 @@ export default function RuleEditorModal({ rule, onSave, onClose }: RuleEditorMod
     updateField('processors', processors);
   };
 
+  // ====== 测试解析 ======
+  const handleTestFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      setTestFile(file);
+      setTestFileName(file.name);
+      setTestRecords([]);
+    }
+  };
+
+  const handleTestParse = useCallback(async () => {
+    if (!testFile) return;
+    setTestLoading(true);
+    setTestRecords([]);
+    try {
+      // 构建完整的 ParseRule
+      const testRule: ParseRule = {
+        ...DEFAULT_RULE,
+        ...form,
+        id: 'test-temp',
+        createdAt: '',
+        updatedAt: '',
+      } as ParseRule;
+
+      const parsedData = await parseFile(testFile);
+
+      const allRecords: Omit<OrderRecord, 'id' | 'batchId' | 'createdAt' | '_rowIndex' | '_errors' | '_duplicateWith'>[] = [];
+
+      for (const sheet of parsedData.sheets) {
+        const parsed = executeParse(
+          sheet.rows,
+          sheet.headers,
+          testRule,
+          parsedData.rawText
+        );
+        allRecords.push(...parsed);
+      }
+
+      // 校验
+      const validated = validateRecords(
+        allRecords.map((r, i) => ({ ...r, _rowIndex: i, _errors: [], _duplicateWith: undefined })) as OrderRecord[]
+      );
+
+      setTestRecords(validated);
+      toast.success(`解析完成: ${validated.length} 条记录`);
+    } catch (err) {
+      toast.error(`测试解析失败: ${err instanceof Error ? err.message : '未知错误'}`);
+    } finally {
+      setTestLoading(false);
+    }
+  }, [testFile, form]);
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
       <div className="card animate-fadeIn w-full max-w-3xl max-h-[90vh] flex flex-col mx-4">
@@ -139,6 +211,7 @@ export default function RuleEditorModal({ rule, onSave, onClose }: RuleEditorMod
             { key: 'basic' as const, label: '基本信息' },
             { key: 'mappings' as const, label: '字段映射' },
             { key: 'processors' as const, label: '处理器' },
+            { key: 'test' as const, label: '🧪 测试解析' },
           ].map(tab => (
             <button
               key={tab.key}
@@ -372,6 +445,9 @@ export default function RuleEditorModal({ rule, onSave, onClose }: RuleEditorMod
                   { type: 'crossRowAggregation' as const, label: '跨行聚合' },
                   { type: 'matrixTranspose' as const, label: '矩阵转置' },
                   { type: 'cardDetection' as const, label: '卡片检测' },
+                  { type: 'compositeCellSplit' as const, label: '复合单元格拆分' },
+                  { type: 'multiOrderSplit' as const, label: '多订单拆分' },
+                  { type: 'textParsing' as const, label: '文本解析' },
                 ].map(p => (
                   <button
                     key={p.type}
@@ -405,6 +481,9 @@ export default function RuleEditorModal({ rule, onSave, onClose }: RuleEditorMod
                               {proc.type === 'crossRowAggregation' && '跨行聚合'}
                               {proc.type === 'matrixTranspose' && '矩阵转置'}
                               {proc.type === 'cardDetection' && '卡片检测'}
+                              {proc.type === 'compositeCellSplit' && '复合单元格拆分'}
+                              {proc.type === 'multiOrderSplit' && '多订单拆分'}
+                              {proc.type === 'textParsing' && '文本解析'}
                             </span>
                           </label>
                         </div>
@@ -484,6 +563,53 @@ export default function RuleEditorModal({ rule, onSave, onClose }: RuleEditorMod
                               />
                             </div>
                           )}
+                          {proc.type === 'compositeCellSplit' && (
+                            <div className="grid grid-cols-2 gap-3">
+                              <div>
+                                <label className="text-xs text-[#86909c]">单元格分隔符</label>
+                                <input
+                                  type="text"
+                                  value={String((proc.options as Record<string, unknown>).cellSeparator || '\\n')}
+                                  onChange={e => updateProcessorOptions(idx, { ...proc.options, cellSeparator: e.target.value })}
+                                  className="form-input text-sm"
+                                  placeholder="如 \\n 换行"
+                                />
+                              </div>
+                              <div>
+                                <label className="text-xs text-[#86909c]">名称x数量匹配</label>
+                                <input
+                                  type="text"
+                                  value={String((proc.options as Record<string, unknown>).nameQtyPattern || '(.+?)[xX×](\\d+)')}
+                                  onChange={e => updateProcessorOptions(idx, { ...proc.options, nameQtyPattern: e.target.value })}
+                                  className="form-input text-sm"
+                                />
+                              </div>
+                            </div>
+                          )}
+                          {proc.type === 'multiOrderSplit' && (
+                            <div>
+                              <label className="text-xs text-[#86909c]">订单分隔正则</label>
+                              <input
+                                type="text"
+                                value={String((proc.options as Record<string, unknown>).orderSeparator || '---+')}
+                                onChange={e => updateProcessorOptions(idx, { ...proc.options, orderSeparator: e.target.value })}
+                                className="form-input text-sm"
+                                placeholder="如 ---- 或 ==="
+                              />
+                            </div>
+                          )}
+                          {proc.type === 'textParsing' && (
+                            <div>
+                              <label className="text-xs text-[#86909c]">记录分隔正则</label>
+                              <input
+                                type="text"
+                                value={String((proc.options as Record<string, unknown>).recordSeparator || '---+')}
+                                onChange={e => updateProcessorOptions(idx, { ...proc.options, recordSeparator: e.target.value })}
+                                className="form-input text-sm"
+                                placeholder="如 ----"
+                              />
+                            </div>
+                          )}
                         </div>
                       )}
                     </div>
@@ -492,6 +618,98 @@ export default function RuleEditorModal({ rule, onSave, onClose }: RuleEditorMod
               )}
             </div>
           )}
+        </div>
+
+          {/* 测试解析 */}
+          {activeTab === 'test' && (
+            <div className="space-y-4">
+              <p className="text-sm text-[#86909c]">上传一个样例文件，用当前规则试解析，实时查看结果</p>
+
+              <div className="flex items-center gap-3">
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  className="hidden"
+                  accept=".xlsx,.xls,.docx,.pdf"
+                  onChange={handleTestFileSelect}
+                />
+                <button
+                  onClick={() => fileInputRef.current?.click()}
+                  className="btn btn-outline btn-sm"
+                >
+                  📁 选择测试文件
+                </button>
+                {testFileName && (
+                  <span className="text-sm text-[#4e5969]">{testFileName}</span>
+                )}
+              </div>
+
+              {testFile && (
+                <button
+                  onClick={handleTestParse}
+                  disabled={testLoading}
+                  className="btn btn-primary btn-sm"
+                >
+                  {testLoading ? (
+                    <span className="flex items-center gap-2">
+                      <span className="animate-spin w-4 h-4 border-2 border-white/30 border-t-white rounded-full" />
+                      解析中...
+                    </span>
+                  ) : (
+                    '🚀 开始测试解析'
+                  )}
+                </button>
+              )}
+
+              {testRecords.length > 0 && (
+                <div>
+                  <p className="text-sm text-[#86909c] mb-2">
+                    解析结果: {testRecords.length} 条记录
+                    {' | '}
+                    {testRecords.filter(r => (r._errors || []).length > 0).length} 条有校验错误
+                  </p>
+                  <div className="max-h-64 overflow-auto rounded-lg border border-[#e5e6eb]">
+                    <table className="w-full text-xs">
+                      <thead className="bg-[#f7f8fa] sticky top-0">
+                        <tr>
+                          {COLUMN_MAPPING_FIELDS.map(f => (
+                            <th key={f} className="px-2 py-1 text-left text-[#86909c] whitespace-nowrap border-b">
+                              {ORDER_FIELD_LABELS[f]}
+                            </th>
+                          ))}
+                          <th className="px-2 py-1 text-left text-[#86909c] whitespace-nowrap border-b">状态</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {testRecords.map((rec, i) => {
+                          const hasError = (rec._errors || []).length > 0;
+                          return (
+                            <tr key={i} className={hasError ? 'bg-[#fff1f0]' : i % 2 === 0 ? 'bg-white' : 'bg-[#fafbfc]'}>
+                              {COLUMN_MAPPING_FIELDS.map(f => (
+                                <td key={f} className="px-2 py-1 border-b border-[#e5e6eb] max-w-[120px] truncate">
+                                  {String((rec as Record<string, unknown>)[f] ?? '')}
+                                </td>
+                              ))}
+                              <td className="px-2 py-1 border-b border-[#e5e6eb]">
+                                {hasError ? (
+                                  <span className="text-[#cf1322]">
+                                    {(rec._errors || []).map(e => e.message).join('; ')}
+                                  </span>
+                                ) : (
+                                  <span className="text-[#00b42a]">✓</span>
+                                )}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
         </div>
 
         {/* Footer */}

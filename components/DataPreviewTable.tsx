@@ -13,9 +13,10 @@ const COLUMNS: OrderField[] = [
 interface DataPreviewTableProps {
   records: OrderRecord[];
   onChange: (records: OrderRecord[]) => void;
+  existingCodes?: Set<string>;
 }
 
-export default function DataPreviewTable({ records, onChange }: DataPreviewTableProps) {
+export default function DataPreviewTable({ records, onChange, existingCodes }: DataPreviewTableProps) {
   const [editCell, setEditCell] = useState<{ row: number; field: OrderField } | null>(null);
   const [editValue, setEditValue] = useState('');
 
@@ -43,11 +44,11 @@ export default function DataPreviewTable({ records, onChange }: DataPreviewTable
 
     // 重新校验
     let validated = validateRecords(newRecords);
-    validated = checkDuplicates(validated, new Set());
+    validated = checkDuplicates(validated, existingCodes || new Set());
 
     onChange(validated);
     setEditCell(null);
-  }, [editCell, editValue, records, onChange]);
+  }, [editCell, editValue, records, onChange, existingCodes]);
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent, rowIndex: number, field: OrderField) => {
     if (e.key === 'Enter') {
@@ -84,9 +85,9 @@ export default function DataPreviewTable({ records, onChange }: DataPreviewTable
   const handleDeleteRow = useCallback((rowIndex: number) => {
     const newRecords = records.filter((_, i) => i !== rowIndex);
     let validated = validateRecords(newRecords);
-    validated = checkDuplicates(validated, new Set());
+    validated = checkDuplicates(validated, existingCodes || new Set());
     onChange(validated);
-  }, [records, onChange]);
+  }, [records, onChange, existingCodes]);
 
   const handleAddRow = useCallback(() => {
     const newRecord: OrderRecord = {
@@ -96,8 +97,9 @@ export default function DataPreviewTable({ records, onChange }: DataPreviewTable
     };
     let newRecords = [...records, newRecord];
     newRecords = validateRecords(newRecords);
+    newRecords = checkDuplicates(newRecords, existingCodes || new Set());
     onChange(newRecords);
-  }, [records, onChange]);
+  }, [records, onChange, existingCodes]);
 
   const handleExport = useCallback(() => {
     exportToExcel(records, '运单数据预览');
@@ -135,17 +137,17 @@ export default function DataPreviewTable({ records, onChange }: DataPreviewTable
         </div>
       </div>
 
-      <div className="table-wrapper" style={{ maxHeight: '60vh', overflowY: 'auto' }}>
+      <div className="table-wrapper" style={{ maxHeight: '60vh', overflow: 'auto' }}>
         <table className="data-table">
           <thead>
             <tr>
-              <th style={{ width: 50, textAlign: 'center' }}>#</th>
+              <th style={{ width: 50, textAlign: 'center', position: 'sticky', top: 0, zIndex: 2, background: '#f7f8fa' }}>#</th>
               {COLUMNS.map((field) => (
-                <th key={field} style={{ minWidth: field === 'receiverAddress' || field === 'remark' ? 180 : 120 }}>
+                <th key={field} style={{ minWidth: field === 'receiverAddress' || field === 'remark' ? 180 : 120, position: 'sticky', top: 0, zIndex: 2, background: '#f7f8fa' }}>
                   {ORDER_FIELD_LABELS[field]}
                 </th>
               ))}
-              <th style={{ width: 80, textAlign: 'center' }}>操作</th>
+              <th style={{ width: 80, textAlign: 'center', position: 'sticky', top: 0, zIndex: 2, background: '#f7f8fa' }}>操作</th>
             </tr>
           </thead>
           <tbody>
