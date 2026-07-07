@@ -43,5 +43,5 @@ dev.log
 devserver.log
 devserver_err.log
 
-# exam attachments (test data, not code)
-AI考试附件/
+# exam attachments (test data, not code) - now tracked per request
+AI考试附件/__MACOSX/
