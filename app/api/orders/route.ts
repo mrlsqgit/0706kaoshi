@@ -1,5 +1,25 @@
 import { NextResponse } from 'next/server';
 import { getOrders, createOrders, checkDuplicateExternalCodes } from '@/lib/db';
+import { OrderRecord } from '@/lib/types';
+
+/** 将请求体中的原始数据转换为 OrderRecord */
+function toOrderRecords(orders: Record<string, unknown>[]): OrderRecord[] {
+  return orders.map((o) => ({
+    id: String(o.id || ''),
+    externalCode: String(o.externalCode || ''),
+    storeName: String(o.storeName || ''),
+    receiverName: String(o.receiverName || ''),
+    receiverPhone: String(o.receiverPhone || ''),
+    receiverAddress: String(o.receiverAddress || ''),
+    skuCode: String(o.skuCode || ''),
+    skuName: String(o.skuName || ''),
+    skuQuantity: Number(o.skuQuantity) || 0,
+    skuSpec: String(o.skuSpec || ''),
+    remark: String(o.remark || ''),
+    batchId: o.batchId ? String(o.batchId) : undefined,
+    createdAt: o.createdAt ? String(o.createdAt) : undefined,
+  }));
+}
 
 export async function GET(req: Request) {
   try {
@@ -26,23 +46,25 @@ export async function GET(req: Request) {
 export async function POST(req: Request) {
   try {
     const body = await req.json();
-    const { orders } = body as { orders: Record<string, unknown>[] };
+    const { orders: rawOrders } = body as { orders: Record<string, unknown>[] };
 
-    if (!orders || !Array.isArray(orders) || orders.length === 0) {
+    if (!rawOrders || !Array.isArray(rawOrders) || rawOrders.length === 0) {
       return NextResponse.json({ error: '运单数据不能为空' }, { status: 400 });
     }
 
+    // 转换为类型安全的 OrderRecord
+    const orders = toOrderRecords(rawOrders);
+
     // 检查外部编码重复
     const codes = orders
-      .map((o) => String(o.externalCode || ''))
+      .map((o) => o.externalCode)
       .filter((c) => c);
     const duplicates = await checkDuplicateExternalCodes(codes);
 
     if (duplicates.length > 0) {
       const dupSet = new Set(duplicates);
-      // 过滤掉重复的，只提交不重复的
       const validOrders = orders.filter(
-        (o) => !dupSet.has(String(o.externalCode || ''))
+        (o) => !dupSet.has(o.externalCode)
       );
 
       if (validOrders.length === 0) {
@@ -52,7 +74,7 @@ export async function POST(req: Request) {
         );
       }
 
-      const created = await createOrders(validOrders as any);
+      const created = await createOrders(validOrders);
       return NextResponse.json({
         success: created.length > 0,
         totalCount: orders.length,
@@ -62,7 +84,7 @@ export async function POST(req: Request) {
       }, { status: 409 });
     }
 
-    const created = await createOrders(orders as unknown[]);
+    const created = await createOrders(orders);
     return NextResponse.json({
       success: true,
       totalCount: orders.length,
