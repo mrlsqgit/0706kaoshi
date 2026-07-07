@@ -1,279 +1,223 @@
-// 数据库抽象层 - Supabase (PostgreSQL)
-// 回退：内存存储（未配置 Supabase 时自动使用）
+// 数据库抽象层 - Neon PostgreSQL (Serverless)
+// 支持 Neon 直接 SQL 连接，未配置时回退内存存储
 
-import { ParseRule, OrderRecord, ColumnMapping, ProcessorConfig, FileType, SheetMergeMode } from './types';
+import { ParseRule, OrderRecord, FileType, SheetMergeMode } from './types';
 import { v4 as uuidv4 } from 'uuid';
-import { supabase, isSupabaseConfigured } from './supabase';
+import { getSql, isDbConfigured } from './db-client';
 
-// ====== camelCase <-> snake_case 转换 ======
+const useDb = isDbConfigured();
+console.log(`[DB] 存储引擎: ${useDb ? 'Neon PostgreSQL' : '内存存储 (Memory)'}`);
 
-type DbRule = {
-  id: string;
-  name: string;
-  description: string;
-  file_type: string;
-  is_ai_generated: boolean;
-  ai_confidence: Record<string, number>;
-  header_rows_to_skip: number;
-  footer_rows_to_skip: number;
-  skip_empty_rows: boolean;
-  skip_summary_rows: boolean;
-  summary_row_keywords: string[];
-  sheet_names: string[];
-  sheet_merge_mode: string;
-  column_mappings: ColumnMapping[];
-  processors: ProcessorConfig[];
-  created_at: string;
-  updated_at: string;
-};
+// ====== 辅助函数 ======
 
-function ruleToDb(rule: Omit<ParseRule, 'id' | 'createdAt' | 'updatedAt'>): Omit<DbRule, 'id' | 'created_at' | 'updated_at'> {
-  return {
-    name: rule.name,
-    description: rule.description,
-    file_type: rule.fileType,
-    is_ai_generated: rule.isAiGenerated,
-    ai_confidence: rule.aiConfidence || {},
-    header_rows_to_skip: rule.headerRowsToSkip,
-    footer_rows_to_skip: rule.footerRowsToSkip,
-    skip_empty_rows: rule.skipEmptyRows,
-    skip_summary_rows: rule.skipSummaryRows,
-    summary_row_keywords: rule.summaryRowKeywords,
-    sheet_names: rule.sheetNames,
-    sheet_merge_mode: rule.sheetMergeMode,
-    column_mappings: rule.columnMappings,
-    processors: rule.processors,
-  };
+function nowISO(): string {
+  return new Date().toISOString();
 }
 
-function ruleToJs(row: DbRule): ParseRule {
-  return {
-    id: row.id,
-    name: row.name,
-    description: row.description || '',
-    fileType: (row.file_type as FileType) || 'excel',
-    isAiGenerated: row.is_ai_generated ?? false,
-    aiConfidence: row.ai_confidence || {},
-    headerRowsToSkip: row.header_rows_to_skip ?? 0,
-    footerRowsToSkip: row.footer_rows_to_skip ?? 0,
-    skipEmptyRows: row.skip_empty_rows ?? true,
-    skipSummaryRows: row.skip_summary_rows ?? false,
-    summaryRowKeywords: row.summary_row_keywords || [],
-    sheetNames: row.sheet_names || [],
-    sheetMergeMode: (row.sheet_merge_mode as SheetMergeMode) || 'separate',
-    columnMappings: row.column_mappings || [],
-    processors: row.processors || [],
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-  };
-}
+// ====== Neon PostgreSQL 实现 ======
 
-type DbOrder = {
-  id: string;
-  batch_id: string | null;
-  external_code: string;
-  store_name: string;
-  receiver_name: string;
-  receiver_phone: string;
-  receiver_address: string;
-  sku_code: string;
-  sku_name: string;
-  sku_quantity: number;
-  sku_spec: string;
-  remark: string;
-  created_at: string;
-};
-
-function orderToDb(order: OrderRecord): Partial<DbOrder> {
-  return {
-    batch_id: order.batchId || null,
-    external_code: order.externalCode || '',
-    store_name: order.storeName || '',
-    receiver_name: order.receiverName || '',
-    receiver_phone: order.receiverPhone || '',
-    receiver_address: order.receiverAddress || '',
-    sku_code: order.skuCode || '',
-    sku_name: order.skuName || '',
-    sku_quantity: typeof order.skuQuantity === 'number' ? order.skuQuantity : parseInt(String(order.skuQuantity), 10) || 0,
-    sku_spec: order.skuSpec || '',
-    remark: order.remark || '',
-  };
-}
-
-function orderToJs(row: DbOrder): OrderRecord {
-  return {
-    id: row.id,
-    batchId: row.batch_id || undefined,
-    externalCode: row.external_code || '',
-    storeName: row.store_name || '',
-    receiverName: row.receiver_name || '',
-    receiverPhone: row.receiver_phone || '',
-    receiverAddress: row.receiver_address || '',
-    skuCode: row.sku_code || '',
-    skuName: row.sku_name || '',
-    skuQuantity: row.sku_quantity ?? 0,
-    skuSpec: row.sku_spec || '',
-    remark: row.remark || '',
-    createdAt: row.created_at,
-  };
-}
-
-// ====== Supabase 实现 ======
-
-const SupabaseStore = {
+const NeonStore = {
   // ---- Rules ----
 
   async getRules(): Promise<ParseRule[]> {
-    const { data, error } = await supabase
-      .from('parse_rules')
-      .select('*')
-      .order('created_at', { ascending: false });
-
-    if (error) throw new Error(`获取规则列表失败: ${error.message}`);
-    return (data || []).map(ruleToJs);
+    const sql = getSql();
+    const rows = await sql`
+      SELECT * FROM parse_rules ORDER BY created_at DESC
+    `;
+    return (rows || []).map(ruleRowToJs);
   },
 
   async getRule(id: string): Promise<ParseRule | null> {
-    const { data, error } = await supabase
-      .from('parse_rules')
-      .select('*')
-      .eq('id', id)
-      .single();
-
-    if (error) {
-      if (error.code === 'PGRST116') return null;
-      throw new Error(`获取规则失败: ${error.message}`);
-    }
-    return ruleToJs(data as DbRule);
+    const sql = getSql();
+    const rows = await sql`SELECT * FROM parse_rules WHERE id = ${id}::uuid`;
+    return rows.length > 0 ? ruleRowToJs(rows[0]) : null;
   },
 
   async createRule(rule: Omit<ParseRule, 'id' | 'createdAt' | 'updatedAt'>): Promise<ParseRule> {
-    const dbRule = ruleToDb(rule);
-    const { data, error } = await supabase
-      .from('parse_rules')
-      .insert(dbRule)
-      .select('*')
-      .single();
-
-    if (error) throw new Error(`创建规则失败: ${error.message}`);
-    return ruleToJs(data as DbRule);
+    const sql = getSql();
+    const now = nowISO();
+    const rows = await sql`
+      INSERT INTO parse_rules (
+        id, name, description, file_type, is_ai_generated, ai_confidence,
+        header_rows_to_skip, footer_rows_to_skip, skip_empty_rows, skip_summary_rows,
+        summary_row_keywords, sheet_names, sheet_merge_mode,
+        column_mappings, processors, created_at, updated_at
+      ) VALUES (
+        ${uuidv4()}::uuid,
+        ${rule.name},
+        ${rule.description || ''},
+        ${rule.fileType || 'excel'},
+        ${rule.isAiGenerated ?? false},
+        ${JSON.stringify(rule.aiConfidence || {})}::jsonb,
+        ${rule.headerRowsToSkip ?? 0},
+        ${rule.footerRowsToSkip ?? 0},
+        ${rule.skipEmptyRows ?? true},
+        ${rule.skipSummaryRows ?? false},
+        ${rule.summaryRowKeywords || []},
+        ${rule.sheetNames || []},
+        ${rule.sheetMergeMode || 'separate'},
+        ${JSON.stringify(rule.columnMappings || [])}::jsonb,
+        ${JSON.stringify(rule.processors || [])}::jsonb,
+        ${now},
+        ${now}
+      )
+      RETURNING *
+    `;
+    return ruleRowToJs(rows[0]);
   },
 
-  async updateRule(id: string, rule: Partial<ParseRule>): Promise<ParseRule | null> {
-    const updates: Record<string, unknown> = {};
-    if (rule.name !== undefined) updates.name = rule.name;
-    if (rule.description !== undefined) updates.description = rule.description;
-    if (rule.fileType !== undefined) updates.file_type = rule.fileType;
-    if (rule.isAiGenerated !== undefined) updates.is_ai_generated = rule.isAiGenerated;
-    if (rule.aiConfidence !== undefined) updates.ai_confidence = rule.aiConfidence;
-    if (rule.headerRowsToSkip !== undefined) updates.header_rows_to_skip = rule.headerRowsToSkip;
-    if (rule.footerRowsToSkip !== undefined) updates.footer_rows_to_skip = rule.footerRowsToSkip;
-    if (rule.skipEmptyRows !== undefined) updates.skip_empty_rows = rule.skipEmptyRows;
-    if (rule.skipSummaryRows !== undefined) updates.skip_summary_rows = rule.skipSummaryRows;
-    if (rule.summaryRowKeywords !== undefined) updates.summary_row_keywords = rule.summaryRowKeywords;
-    if (rule.sheetNames !== undefined) updates.sheet_names = rule.sheetNames;
-    if (rule.sheetMergeMode !== undefined) updates.sheet_merge_mode = rule.sheetMergeMode;
-    if (rule.columnMappings !== undefined) updates.column_mappings = rule.columnMappings;
-    if (rule.processors !== undefined) updates.processors = rule.processors;
+  async updateRule(id: string, updates: Partial<ParseRule>): Promise<ParseRule | null> {
+    const sql = getSql();
+    const now = nowISO();
 
-    if (Object.keys(updates).length === 0) {
-      return SupabaseStore.getRule(id);
-    }
-
-    const { data, error } = await supabase
-      .from('parse_rules')
-      .update(updates)
-      .eq('id', id)
-      .select('*')
-      .single();
-
-    if (error) {
-      if (error.code === 'PGRST116') return null;
-      throw new Error(`更新规则失败: ${error.message}`);
-    }
-    return ruleToJs(data as DbRule);
+    const rows = await sql`
+      UPDATE parse_rules SET
+        updated_at = ${now},
+        name = ${updates.name !== undefined ? updates.name : null},
+        description = ${updates.description !== undefined ? updates.description : null},
+        file_type = ${updates.fileType !== undefined ? updates.fileType : null},
+        is_ai_generated = ${updates.isAiGenerated !== undefined ? updates.isAiGenerated : null},
+        ai_confidence = ${updates.aiConfidence !== undefined ? JSON.stringify(updates.aiConfidence) : null}::jsonb,
+        header_rows_to_skip = ${updates.headerRowsToSkip !== undefined ? updates.headerRowsToSkip : null},
+        footer_rows_to_skip = ${updates.footerRowsToSkip !== undefined ? updates.footerRowsToSkip : null},
+        skip_empty_rows = ${updates.skipEmptyRows !== undefined ? updates.skipEmptyRows : null},
+        skip_summary_rows = ${updates.skipSummaryRows !== undefined ? updates.skipSummaryRows : null},
+        summary_row_keywords = ${updates.summaryRowKeywords !== undefined ? updates.summaryRowKeywords : null},
+        sheet_names = ${updates.sheetNames !== undefined ? updates.sheetNames : null},
+        sheet_merge_mode = ${updates.sheetMergeMode !== undefined ? updates.sheetMergeMode : null},
+        column_mappings = ${updates.columnMappings !== undefined ? JSON.stringify(updates.columnMappings) : null}::jsonb,
+        processors = ${updates.processors !== undefined ? JSON.stringify(updates.processors) : null}::jsonb
+      WHERE id = ${id}::uuid
+      RETURNING *
+    `;
+    return rows.length > 0 ? ruleRowToJs(rows[0]) : null;
   },
 
   async deleteRule(id: string): Promise<boolean> {
-    const { error } = await supabase
-      .from('parse_rules')
-      .delete()
-      .eq('id', id);
-
-    if (error) throw new Error(`删除规则失败: ${error.message}`);
-    return true;
+    const sql = getSql();
+    const rows = await sql`DELETE FROM parse_rules WHERE id = ${id}::uuid RETURNING id`;
+    return rows.length > 0;
   },
 
   // ---- Orders ----
 
-  async getOrders(page: number, pageSize: number, filters?: { externalCode?: string; receiverName?: string; createdAtStart?: string; createdAtEnd?: string }): Promise<{ orders: OrderRecord[]; total: number }> {
-    const from = (page - 1) * pageSize;
-    const to = from + pageSize - 1;
+  async getOrders(
+    page: number,
+    pageSize: number,
+    filters?: { externalCode?: string; receiverName?: string; createdAtStart?: string; createdAtEnd?: string }
+  ): Promise<{ orders: OrderRecord[]; total: number }> {
+    const sql = getSql();
+    const offset = (page - 1) * pageSize;
 
-    let query = supabase
-      .from('orders')
-      .select('*', { count: 'exact' });
+    // 构建 WHERE 条件
+    const conditions: string[] = [];
+    if (filters?.externalCode) conditions.push(`external_code ILIKE '%${filters.externalCode.replace(/'/g, "''")}%'`);
+    if (filters?.receiverName) conditions.push(`receiver_name ILIKE '%${filters.receiverName.replace(/'/g, "''")}%'`);
+    if (filters?.createdAtStart) conditions.push(`created_at >= '${filters.createdAtStart}'`);
+    if (filters?.createdAtEnd) conditions.push(`created_at <= '${filters.createdAtEnd}'`);
 
-    if (filters?.externalCode) {
-      query = query.ilike('external_code', `%${filters.externalCode}%`);
-    }
-    if (filters?.receiverName) {
-      query = query.ilike('receiver_name', `%${filters.receiverName}%`);
-    }
-    if (filters?.createdAtStart) {
-      query = query.gte('created_at', filters.createdAtStart);
-    }
-    if (filters?.createdAtEnd) {
-      query = query.lte('created_at', filters.createdAtEnd);
-    }
+    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
-    const { data, error, count } = await query
-      .order('created_at', { ascending: false })
-      .range(from, to);
+    const [dataRows, countRows] = await Promise.all([
+      sql.unsafe(`SELECT * FROM orders ${whereClause} ORDER BY created_at DESC LIMIT ${pageSize} OFFSET ${offset}`),
+      sql.unsafe(`SELECT COUNT(*)::int as total FROM orders ${whereClause}`),
+    ]);
 
-    if (error) throw new Error(`获取运单列表失败: ${error.message}`);
     return {
-      orders: (data || []).map(orderToJs),
-      total: count || 0,
+      orders: (dataRows || []).map(orderRowToJs),
+      total: countRows?.[0]?.total || 0,
     };
   },
 
   async createOrders(orders: OrderRecord[]): Promise<OrderRecord[]> {
+    if (orders.length === 0) return [];
+    const sql = getSql();
     const batchId = uuidv4();
-    const dbOrders = orders.map(o => ({
-      ...orderToDb(o),
-      id: uuidv4(),
-      batch_id: batchId,
-    }));
 
-    const { data, error } = await supabase
-      .from('orders')
-      .insert(dbOrders)
-      .select('*');
-
-    if (error) throw new Error(`创建运单失败: ${error.message}`);
-    return (data || []).map(orderToJs);
+    // 逐条插入（Neon HTTP driver 不支持批量 INSERT 的 multiline）
+    const results: OrderRecord[] = [];
+    for (const order of orders) {
+      const rows = await sql`
+        INSERT INTO orders (
+          id, batch_id, external_code, store_name, receiver_name, receiver_phone,
+          receiver_address, sku_code, sku_name, sku_quantity, sku_spec, remark, created_at
+        ) VALUES (
+          ${uuidv4()}::uuid,
+          ${batchId}::uuid,
+          ${order.externalCode || ''},
+          ${order.storeName || ''},
+          ${order.receiverName || ''},
+          ${order.receiverPhone || ''},
+          ${order.receiverAddress || ''},
+          ${order.skuCode || ''},
+          ${order.skuName || ''},
+          ${Number(order.skuQuantity) || 0},
+          ${order.skuSpec || ''},
+          ${order.remark || ''},
+          ${nowISO()}
+        )
+        RETURNING *
+      `;
+      if (rows.length > 0) results.push(orderRowToJs(rows[0]));
+    }
+    return results;
   },
 
-  async checkDuplicateExternalCodes(codes: string[], excludeBatchId?: string): Promise<string[]> {
-    const { data, error } = await supabase
-      .from('orders')
-      .select('external_code')
-      .in('external_code', codes);
-
-    if (error) throw new Error(`重复检测失败: ${error.message}`);
-    return (data || []).map((r: { external_code: string }) => r.external_code);
+  async checkDuplicateExternalCodes(codes: string[]): Promise<string[]> {
+    if (codes.length === 0) return [];
+    const sql = getSql();
+    const rows = await sql`SELECT external_code FROM orders WHERE external_code = ANY(${codes})`;
+    return (rows || []).map((r: { external_code: string }) => r.external_code);
   },
 
   async getAllExternalCodes(): Promise<Set<string>> {
-    const { data, error } = await supabase
-      .from('orders')
-      .select('external_code');
-
-    if (error) throw new Error(`获取外部编码失败: ${error.message}`);
-    return new Set((data || []).map((r: { external_code: string }) => r.external_code));
+    const sql = getSql();
+    const rows = await sql`SELECT external_code FROM orders`;
+    return new Set((rows || []).map((r: { external_code: string }) => r.external_code));
   },
 };
+
+// ====== 数据行转换（Neon 行 → JS 对象） ======
+
+function ruleRowToJs(row: Record<string, unknown>): ParseRule {
+  return {
+    id: String(row.id || ''),
+    name: String(row.name || ''),
+    description: String(row.description || ''),
+    fileType: (String(row.file_type || '') as FileType) || 'excel',
+    isAiGenerated: Boolean(row.is_ai_generated),
+    aiConfidence: (typeof row.ai_confidence === 'object' ? row.ai_confidence : {}) as Record<string, number>,
+    headerRowsToSkip: Number(row.header_rows_to_skip) || 0,
+    footerRowsToSkip: Number(row.footer_rows_to_skip) || 0,
+    skipEmptyRows: row.skip_empty_rows !== false,
+    skipSummaryRows: Boolean(row.skip_summary_rows),
+    summaryRowKeywords: Array.isArray(row.summary_row_keywords) ? row.summary_row_keywords as string[] : [],
+    sheetNames: Array.isArray(row.sheet_names) ? row.sheet_names as string[] : [],
+    sheetMergeMode: (String(row.sheet_merge_mode || '') as SheetMergeMode) || 'separate',
+    columnMappings: Array.isArray(row.column_mappings) ? row.column_mappings as any[] : [],
+    processors: Array.isArray(row.processors) ? row.processors as any[] : [],
+    createdAt: String(row.created_at || ''),
+    updatedAt: String(row.updated_at || ''),
+  };
+}
+
+function orderRowToJs(row: Record<string, unknown>): OrderRecord {
+  return {
+    id: String(row.id || ''),
+    batchId: row.batch_id ? String(row.batch_id) : undefined,
+    externalCode: String(row.external_code || ''),
+    storeName: String(row.store_name || ''),
+    receiverName: String(row.receiver_name || ''),
+    receiverPhone: String(row.receiver_phone || ''),
+    receiverAddress: String(row.receiver_address || ''),
+    skuCode: String(row.sku_code || ''),
+    skuName: String(row.sku_name || ''),
+    skuQuantity: Number(row.sku_quantity) || 0,
+    skuSpec: String(row.sku_spec || ''),
+    remark: String(row.remark || ''),
+    createdAt: String(row.created_at || ''),
+  };
+}
 
 // ====== 内存存储实例（回退） ======
 
@@ -284,7 +228,7 @@ class MemoryStore {
   async getRules(): Promise<ParseRule[]> { return [...this.rules]; }
   async getRule(id: string): Promise<ParseRule | null> { return this.rules.find(r => r.id === id) || null; }
   async createRule(rule: Omit<ParseRule, 'id' | 'createdAt' | 'updatedAt'>): Promise<ParseRule> {
-    const now = new Date().toISOString();
+    const now = nowISO();
     const newRule: ParseRule = { ...rule, id: uuidv4(), createdAt: now, updatedAt: now };
     this.rules.push(newRule);
     return newRule;
@@ -292,7 +236,7 @@ class MemoryStore {
   async updateRule(id: string, rule: Partial<ParseRule>): Promise<ParseRule | null> {
     const idx = this.rules.findIndex(r => r.id === id);
     if (idx === -1) return null;
-    this.rules[idx] = { ...this.rules[idx], ...rule, updatedAt: new Date().toISOString() };
+    this.rules[idx] = { ...this.rules[idx], ...rule, updatedAt: nowISO() };
     return this.rules[idx];
   }
   async deleteRule(id: string): Promise<boolean> {
@@ -314,12 +258,12 @@ class MemoryStore {
   }
   async createOrders(orders: OrderRecord[]): Promise<OrderRecord[]> {
     const batchId = uuidv4();
-    const now = new Date().toISOString();
+    const now = nowISO();
     const newOrders = orders.map(o => ({ ...o, id: uuidv4(), batchId, createdAt: now }));
     this.orders.push(...newOrders);
     return newOrders;
   }
-  async checkDuplicateExternalCodes(codes: string[], excludeBatchId?: string): Promise<string[]> {
+  async checkDuplicateExternalCodes(codes: string[], _excludeBatchId?: string): Promise<string[]> {
     return this.orders
       .filter(o => codes.includes(o.externalCode) && o.externalCode)
       .map(o => o.externalCode);
@@ -331,44 +275,40 @@ class MemoryStore {
 
 const memoryStore = new MemoryStore();
 
-// ====== 自动选择存储引擎 ======
+// ====== 统一导出接口 ======
 
-const useSupabase = isSupabaseConfigured();
-console.log(`[DB] 存储引擎: ${useSupabase ? 'Supabase (PostgreSQL)' : '内存存储 (Memory)'}`);
-
-// 对外导出统一接口
 export async function getRules(): Promise<ParseRule[]> {
-  return useSupabase ? SupabaseStore.getRules() : memoryStore.getRules();
+  return useDb ? NeonStore.getRules() : memoryStore.getRules();
 }
 
 export async function getRule(id: string): Promise<ParseRule | null> {
-  return useSupabase ? SupabaseStore.getRule(id) : memoryStore.getRule(id);
+  return useDb ? NeonStore.getRule(id) : memoryStore.getRule(id);
 }
 
 export async function createRule(rule: Omit<ParseRule, 'id' | 'createdAt' | 'updatedAt'>): Promise<ParseRule> {
-  return useSupabase ? SupabaseStore.createRule(rule) : memoryStore.createRule(rule);
+  return useDb ? NeonStore.createRule(rule) : memoryStore.createRule(rule);
 }
 
 export async function updateRule(id: string, rule: Partial<ParseRule>): Promise<ParseRule | null> {
-  return useSupabase ? SupabaseStore.updateRule(id, rule) : memoryStore.updateRule(id, rule);
+  return useDb ? NeonStore.updateRule(id, rule) : memoryStore.updateRule(id, rule);
 }
 
 export async function deleteRule(id: string): Promise<boolean> {
-  return useSupabase ? SupabaseStore.deleteRule(id) : memoryStore.deleteRule(id);
+  return useDb ? NeonStore.deleteRule(id) : memoryStore.deleteRule(id);
 }
 
 export async function getOrders(page: number, pageSize: number, filters?: { externalCode?: string; receiverName?: string; createdAtStart?: string; createdAtEnd?: string }): Promise<{ orders: OrderRecord[]; total: number }> {
-  return useSupabase ? SupabaseStore.getOrders(page, pageSize, filters) : memoryStore.getOrders(page, pageSize, filters);
+  return useDb ? NeonStore.getOrders(page, pageSize, filters) : memoryStore.getOrders(page, pageSize, filters);
 }
 
 export async function createOrders(orders: OrderRecord[]): Promise<OrderRecord[]> {
-  return useSupabase ? SupabaseStore.createOrders(orders) : memoryStore.createOrders(orders);
+  return useDb ? NeonStore.createOrders(orders) : memoryStore.createOrders(orders);
 }
 
 export async function checkDuplicateExternalCodes(codes: string[], excludeBatchId?: string): Promise<string[]> {
-  return useSupabase ? SupabaseStore.checkDuplicateExternalCodes(codes, excludeBatchId) : memoryStore.checkDuplicateExternalCodes(codes, excludeBatchId);
+  return useDb ? NeonStore.checkDuplicateExternalCodes(codes) : memoryStore.checkDuplicateExternalCodes(codes, excludeBatchId);
 }
 
 export async function getAllExternalCodes(): Promise<Set<string>> {
-  return useSupabase ? SupabaseStore.getAllExternalCodes() : memoryStore.getAllExternalCodes();
+  return useDb ? NeonStore.getAllExternalCodes() : memoryStore.getAllExternalCodes();
 }

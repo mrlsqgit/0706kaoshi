@@ -12,10 +12,8 @@ export const metadata: Metadata = {
 };
 
 function DbStatusIndicator() {
-  // 服务端渲染时检查 Supabase 配置
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || '';
-  const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '';
-  const isConfigured = supabaseUrl && supabaseKey && !supabaseUrl.includes('your-project-id');
+  const dbUrl = process.env.DATABASE_URL || '';
+  const isConfigured = dbUrl && !dbUrl.includes('your-') && dbUrl.length > 20;
 
   if (isConfigured) return null;
 
@@ -28,7 +26,7 @@ function DbStatusIndicator() {
       fontSize: 13,
       color: '#d97b00',
     }}>
-      ⚠️ 数据库未配置（使用内存存储，数据不会持久化）。请配置 .env.local 中的 Supabase 连接信息。
+      ⚠️ 数据库未配置（使用内存存储，数据不会持久化）。请在 .env.local 中设置 DATABASE_URL。
     </div>
   );
 }

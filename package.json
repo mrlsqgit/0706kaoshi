@@ -9,6 +9,7 @@
     "lint": "next lint"
   },
   "dependencies": {
+    "@neondatabase/serverless": "^1.1.0",
     "@supabase/supabase-js": "^2.109.0",
     "clsx": "^2.1.1",
     "file-saver": "^2.0.5",

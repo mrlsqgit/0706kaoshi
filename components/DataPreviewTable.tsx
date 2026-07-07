@@ -12,6 +12,23 @@ const COLUMNS: OrderField[] = [
   'skuCode', 'skuName', 'skuQuantity', 'skuSpec', 'remark',
 ];
 
+/** 类型安全地读取 OrderRecord 字段值 */
+function getFieldValue(record: OrderRecord, field: OrderField): string {
+  return String(record[field] ?? '');
+}
+
+/** 类型安全地设置 OrderRecord 字段值（返回新对象） */
+function setFieldValue(record: OrderRecord, field: OrderField, value: string | number): OrderRecord {
+  const updated = { ...record };
+  if (field === 'skuQuantity') {
+    updated.skuQuantity = typeof value === 'number' ? value : (parseFloat(value as string) || 0);
+  } else {
+    // 所有其他字段都是 string 类型
+    (updated as Record<OrderField, unknown>)[field] = String(value);
+  }
+  return updated;
+}
+
 const ROW_HEIGHT = 42;
 // 超过此阈值启用虚拟列表
 const VIRTUAL_THRESHOLD = 50;
@@ -31,7 +48,7 @@ export default function DataPreviewTable({ records, onChange, existingCodes }: D
     const record = records[rowIndex];
     const value = field === 'skuQuantity'
       ? String(record.skuQuantity || '')
-      : String((record as Record<string, unknown>)[field] || '');
+      : getFieldValue(record, field);
     setEditValue(value);
     setEditCell({ row: rowIndex, field });
     // 聚焦输入框
@@ -41,14 +58,7 @@ export default function DataPreviewTable({ records, onChange, existingCodes }: D
   const handleCellSave = useCallback(() => {
     if (!editCell) return;
     const newRecords = [...records];
-    const record = { ...newRecords[editCell.row] };
-
-    if (editCell.field === 'skuQuantity') {
-      record.skuQuantity = parseFloat(editValue) || 0;
-    } else {
-      (record as Record<string, unknown>)[editCell.field] = editValue;
-    }
-
+    const record = setFieldValue(newRecords[editCell.row], editCell.field, editValue);
     newRecords[editCell.row] = record;
 
     // 重新校验
@@ -149,7 +159,7 @@ export default function DataPreviewTable({ records, onChange, existingCodes }: D
           const isEditing = editCell?.row === index && editCell?.field === field;
           const value = field === 'skuQuantity'
             ? (record.skuQuantity ?? '')
-            : String((record as Record<string, unknown>)[field] ?? '');
+            : getFieldValue(record, field);
           const hasError = record._errors?.some(e => e.field === field);
 
           return (
