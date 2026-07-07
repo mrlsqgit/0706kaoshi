@@ -30,8 +30,9 @@ function extractField(row: Record<string, unknown>, colIndex: number | string, h
     }
     return '';
   }
-  // 按列名
-  const val = row[colIndex];
+  // 按列名（防御性：去掉可能存在的星号 *，与 file-parsers 去星后的表头保持一致）
+  const key = String(colIndex).replace(/\*/g, '');
+  const val = row[key];
   return val != null ? String(val).trim() : '';
 }
 

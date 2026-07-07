@@ -50,8 +50,9 @@ export async function parseExcelFile(file: File): Promise<ParsedFileData> {
           // 使用第一行作为默认表头
           const rawHeaders = json[0] as unknown[];
           // 注意：空字符串/空白也要回退为 Column_i，否则多列共享 '' 键会导致数据列被覆盖丢失
+          // 去星号(*)：表头常见「配送汇总单号*」等必填标记，去掉后与 AI 生成的干净列名/规则映射一致，避免查不到列
           const headers = rawHeaders.map((h, i) => {
-            const s = String(h ?? '').trim();
+            const s = String(h ?? '').trim().replace(/\*/g, '');
             return s || `Column_${i}`;
           });
 
