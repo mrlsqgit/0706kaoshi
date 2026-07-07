@@ -18,6 +18,16 @@ import {
   MultiSheetOptions,
 } from './types';
 
+// 内建「非数据行」首单元格关键字：命中则视为标题/合计/页脚尾注行，直接跳过。
+// 作为通用兜底，避免 AI 漏设 footerRowsToSkip / summaryRowKeywords 时，
+// 底部「合计/制单人/收货门店/联系人/联系电话/收货地址」等键值尾注行被当成 SKU 数据行，
+// 导致 skuCode/skuQuantity 缺失而校验失败。
+const BUILTIN_NON_DATA_FIRST_CELL_KEYWORDS = [
+  '合计', '总计', '小计', '制单', '审核', '签字',
+  '收货门店', '收货人', '联系人', '联系电话', '收货地址',
+  '出库日期', '打印', '经手', '出纳', '仓库：', '备注：', '说明：',
+];
+
 // ====== 工具函数 ======
 
 /** 从一行数据中提取字段值 */
@@ -71,6 +81,14 @@ function skipSummaryAndEmpty(
   rule: ParseRule
 ): Record<string, unknown>[] {
   return rows.filter((row) => {
+    // 兜底：首单元格命中内建非数据行关键字（合计/制单/收货门店/联系人/联系电话/收货地址…）则跳过
+    const firstCell = Object.values(row)[0];
+    if (
+      firstCell != null &&
+      BUILTIN_NON_DATA_FIRST_CELL_KEYWORDS.some((k) => String(firstCell).includes(k))
+    ) {
+      return false;
+    }
     if (rule.skipEmptyRows) {
       const allEmpty = Object.values(row).every(
         (v) => v == null || String(v).trim() === ''
@@ -145,35 +163,39 @@ function processTailInfoExtraction(
   const tailRows = allRows.slice(Math.max(0, allRows.length - options.tailRowsCount));
 
   for (const mapping of options.fieldMappings) {
+    const otherPatterns = options.fieldMappings.filter(
+      m => m.keywordPattern !== mapping.keywordPattern
+    );
     for (const row of tailRows) {
-      const rowText = Object.values(row).map(v => String(v ?? '')).join(' ').trim();
-      if (new RegExp(mapping.keywordPattern, 'i').test(rowText)) {
-        // 策略1：检查是否第一列匹配关键词 → 取第二列作为值（交替KV格式）
-        const firstCol = Object.values(row)[0];
-        if (firstCol != null && new RegExp(mapping.keywordPattern, 'i').test(String(firstCol))) {
-          const cells = Object.values(row).slice(1).map(v => String(v ?? '').trim());
-          // 取第一个非空值作为目标字段值，但如果后面还有已知关键词，则停止
-          const otherPatterns = options.fieldMappings.filter(
-            m => m.keywordPattern !== mapping.keywordPattern
-          );
-          for (const cell of cells) {
-            if (!cell) continue;
-            // 检查该单元格是否包含其他关键词（避免串值）
+      const cells = Object.values(row).map(v => String(v ?? '').trim());
+      const rowText = cells.join(' ').trim();
+      if (!new RegExp(mapping.keywordPattern, 'i').test(rowText)) continue;
+
+      let extracted = '';
+      // 策略1：关键词可在任意列，其值取其后第一个「非关键字」单元格
+      // （兼容一行多 KV：如 "收货门店：xx  联系人：yy  收货地址：zz"）
+      for (let j = 0; j < cells.length - 1; j++) {
+        if (new RegExp(mapping.keywordPattern, 'i').test(cells[j])) {
+          for (let k = j + 1; k < cells.length; k++) {
+            const candidate = cells[k];
+            if (!candidate) continue;
             const isOtherKey = otherPatterns.some(
-              p => new RegExp(p.keywordPattern, 'i').test(cell)
+              p => new RegExp(p.keywordPattern, 'i').test(candidate)
             );
             if (!isOtherKey) {
-              tailInfo[mapping.targetField] = cell;
+              extracted = candidate;
               break;
             }
           }
-          // 如果策略1提取成功，跳出
-          if (tailInfo[mapping.targetField]) break;
+          if (extracted) break;
         }
-        // 策略2：正则提取（fallback）
-        if (!tailInfo[mapping.targetField]) {
-          tailInfo[mapping.targetField] = extractByPattern(rowText, mapping.extractPattern);
-        }
+      }
+      // 策略2：正则提取（fallback，取首个冒号后的内容）
+      if (!extracted) {
+        extracted = extractByPattern(rowText, mapping.extractPattern);
+      }
+      if (extracted) {
+        tailInfo[mapping.targetField] = extracted;
         break;
       }
     }

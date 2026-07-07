@@ -45,7 +45,7 @@ const SYSTEM_PROMPT = `你是一个文件解析规则专家。你的任务是分
   ],
   "processors": [
     {
-      "type": "tailInfoExtraction" | "crossRowAggregation" | "matrixTranspose" | "cardDetection",
+      "type": "tailInfoExtraction" | "headerInfoExtraction" | "crossRowAggregation" | "matrixTranspose" | "cardDetection" | "multiSheet",
       "enabled": true,
       "options": {}
     }
@@ -68,6 +68,9 @@ const SYSTEM_PROMPT = `你是一个文件解析规则专家。你的任务是分
    options: { "rowIdentifierFields": ["skuName"], "columnHeaderStartIndex": 2, "columnValueField": "storeName", "cellSplitSeparator": "\\n", "cellSplitItemFormat": "[xX×]" }
 5. cardDetection - 卡片式: 每条记录是一个独立卡片
    options: { "cardStartKeyword": "▶|调拨记录", "internalFieldPatterns": [{ "targetField": "storeName", "keyword": "门店|收货门店" }] }
+6. multiSheet - 多Sheet处理: 文件含多个 Sheet，每个 Sheet 是一个独立门店/收货方/订单（如 Sheet 名"银泰店""金桥店""金银潭店"）。启用后从 Sheet 名称提取字段值（典型为 storeName）。
+   options: { "sheetNameFieldMappings": [{ "targetField": "storeName" }] } —— Sheet 名本身就是门店名则【不填 extractPattern】，直接使用完整 Sheet 名；需用正则从 Sheet 名截取时再填 extractPattern（如 "门店(.+)"）。
+   注意：多门店分 Sheet 出库单里，数据列通常【没有】门店名列，门店名只存在于 Sheet 名（或顶部/底部尾注），因此必须用 multiSheet 提取，绝不能用低置信度列映射去猜 storeName。
 
 重要规则：
 - 不要硬编码特定文件名或列名的判断逻辑
@@ -87,7 +90,12 @@ const SYSTEM_PROMPT = `你是一个文件解析规则专家。你的任务是分
 4. sourceColumn 只能使用预览 headers 中真实存在的列名，不得臆造；preview 里提供了 headers、sampleRows、sampleRowsTail，请据此判断表头位置。
 5. headerRowsToSkip：数清"真正的列标题行"之前有几行（大标题、空行、说明文字）就填几；footerRowsToSkip 同理（底部收货信息、合计行）。不要漏填也不要多填。
 6. summaryRowKeywords 必须包含 ["合计","总计","小计"] 以跳过汇总行。
-7. 不确定字段不要强行映射，宁可留空并给出低 confidence，也不要映射到错误列。`;
+7. 不确定字段不要强行映射，宁可留空并给出低 confidence，也不要映射到错误列。
+8. 多 Sheet 门店文件（每个 Sheet 名就是门店，如"银泰店""金桥店"）：必须启用 multiSheet 处理器，用 sheetNameFieldMappings 把 storeName 映射到 Sheet 名（不填 extractPattern）。数据列里通常没有门店名，切勿用低置信度列映射去猜 storeName，否则每条记录都缺 storeName 而全部校验失败。
+9. 顶部/底部行计数必须"数全"：
+   - headerRowsToSkip = 从文件第 1 行（预览里的 headers 行）到"真正列标题行"之间的【总】行数（含被当作表头的大标题行本身、出库日期/仓库等信息行、空行）。例如第1行大标题、第2行出库日期信息、第3行空、第4行才是列标题，则 headerRowsToSkip=3。数错会导致表头错位、SKU 字段全部丢失。
+   - footerRowsToSkip = 数据块之后到文件末尾的【总】行数（含合计行、收货门店/联系人/联系电话/收货地址等键值尾注行、制单人/审核人行、空行）。即便数不准，引擎也会兜底跳过首单元格为"合计/制单/收货门店/联系人/联系电话/收货地址"等的尾注行；但请尽量数准。
+   - 底部若存在"收货门店：xxx / 联系人：xxx / 联系电话：xxx / 收货地址：xxx"键值行，应同时启用 tailInfoExtraction 提取（keywordPattern 用 "联系人|收货人"、"联系电话|收货电话"、"收货地址"，extractPattern 用 "[:：]\\s*(.+)"），引擎会把它们注入到每条记录。`;
 
 // 从模型返回中尽量稳健地解析出 JSON 对象：
 // 1) 去掉 ``` 代码块包裹 2) 截取最外层 {} 3) 去除尾随逗号
