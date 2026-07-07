@@ -49,7 +49,11 @@ export async function parseExcelFile(file: File): Promise<ParsedFileData> {
 
           // 使用第一行作为默认表头
           const rawHeaders = json[0] as unknown[];
-          const headers = rawHeaders.map((h, i) => String(h ?? `Column_${i}`));
+          // 注意：空字符串/空白也要回退为 Column_i，否则多列共享 '' 键会导致数据列被覆盖丢失
+          const headers = rawHeaders.map((h, i) => {
+            const s = String(h ?? '').trim();
+            return s || `Column_${i}`;
+          });
 
           // 转换为带表头的行对象
           const rows: Record<string, unknown>[] = [];
@@ -120,14 +124,17 @@ export async function parseWordFile(file: File): Promise<ParsedFileData> {
 /** 读取 PDF 文件提取文本 */
 export async function parsePdfFile(file: File): Promise<ParsedFileData> {
   try {
-    // 动态导入 pdfjs-dist
-    const pdfjsLib = await import('pdfjs-dist');
-    if (!pdfjsLib.GlobalWorkerOptions.workerSrc) {
-      pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.js`;
-    }
+    // 动态导入 pdfjs-dist legacy 构建（兼容性更好）
+    const pdfjsLib = await import('pdfjs-dist/legacy/build/pdf.min.mjs');
+
+    // 通过 Blob URL 加载 Worker，避免跨域/MIME 问题
+    const workerResp = await fetch('/pdf.worker.min.mjs');
+    const workerCode = await workerResp.text();
+    const workerBlob = new Blob([workerCode], { type: 'application/javascript' });
+    pdfjsLib.GlobalWorkerOptions.workerSrc = URL.createObjectURL(workerBlob);
 
     const arrayBuffer = await file.arrayBuffer();
-    const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+    const pdf = await pdfjsLib.getDocument({ data: arrayBuffer, disableRange: true, disableStream: true }).promise;
 
     const allText: string[] = [];
     const allRows: Record<string, unknown>[] = [];

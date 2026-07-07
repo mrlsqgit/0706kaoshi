@@ -3,7 +3,8 @@
 import { useEffect, useState, useCallback } from 'react';
 import toast from 'react-hot-toast';
 import { ParsedFileData, getPreviewForAI } from '@/lib/file-parsers';
-import { ParseRule, FileType } from '@/lib/types';
+import { ParseRule, FileType, OrderRecord } from '@/lib/types';
+import { executeParse, validateRecords } from '@/lib/rule-engine';
 import RuleEditorModal from '@/components/RuleEditorModal';
 
 interface RuleSelectorProps {
@@ -25,6 +26,10 @@ export default function RuleSelector({ parsedData, onRuleSelected, selectedRule 
   const [showAiDetail, setShowAiDetail] = useState(false);
   // AI 规则手动微调确认
   const [showAiEditor, setShowAiEditor] = useState(false);
+  // AI 规则本地预校验结果（直接应用前）
+  const [aiValidation, setAiValidation] = useState<{ count: number; errRows: number } | null>(null);
+  // AI 生成后基于当前文件的「实测解析」结果（反推实测置信度）
+  const [aiParseTest, setAiParseTest] = useState<{ count: number; errRows: number } | null>(null);
 
   useEffect(() => {
     loadRules();
@@ -47,6 +52,8 @@ export default function RuleSelector({ parsedData, onRuleSelected, selectedRule 
   const handleAiGenerate = useCallback(async () => {
     setAiLoading(true);
     setAiResult(null);
+    setAiValidation(null);
+    setAiParseTest(null);
     try {
       const preview = getPreviewForAI(parsedData);
       const res = await fetch('/api/ai/generate-rule', {
@@ -63,6 +70,11 @@ export default function RuleSelector({ parsedData, onRuleSelected, selectedRule 
         setAiResult({ rule: {}, analysis: '', confidence: {}, error: data.error || 'AI 生成失败' });
       } else {
         setAiResult(data);
+        // 生成后立即用当前文件实测，反推「实测置信度」（替代模型自评的片面性）
+        if (data.rule) {
+          const test = testRule(normalizeRule(data.rule));
+          setAiParseTest(test);
+        }
         toast.success('AI 已分析文件结构并生成推荐规则，请检查并确认');
       }
     } catch (err) {
@@ -72,12 +84,139 @@ export default function RuleSelector({ parsedData, onRuleSelected, selectedRule 
     }
   }, [parsedData]);
 
-  // 直接应用 AI 规则并解析
+  // 将 Partial 规则补全为可直接交给引擎的完整规则（仅用于本地预校验）
+  const normalizeRule = useCallback(
+    (partial: Partial<ParseRule>): ParseRule => ({
+      id: 'ai-preview',
+      name: partial.name || 'AI 规则',
+      description: partial.description || '',
+      fileType: partial.fileType || parsedData.fileType,
+      isAiGenerated: true,
+      aiConfidence: partial.aiConfidence,
+      headerRowsToSkip: partial.headerRowsToSkip ?? 0,
+      footerRowsToSkip: partial.footerRowsToSkip ?? 0,
+      skipEmptyRows: partial.skipEmptyRows ?? true,
+      skipSummaryRows: partial.skipSummaryRows ?? false,
+      summaryRowKeywords: partial.summaryRowKeywords || ['合计', '总计', '小计'],
+      sheetNames: partial.sheetNames || [],
+      sheetMergeMode: partial.sheetMergeMode || 'separate',
+      columnMappings: partial.columnMappings || [],
+      processors: partial.processors || [],
+      createdAt: '',
+      updatedAt: '',
+    }),
+    [parsedData.fileType]
+  );
+
+  // 文件名与规则名的匹配度（用于自动改用时的「按名称匹配」）
+  const nameScore = useCallback((fileName: string, ruleName: string): number => {
+    const clean = (s: string) =>
+      s.toLowerCase().replace(/[\s._()（）（）-]+/g, '');
+    const a = clean(fileName);
+    const b = clean(ruleName);
+    if (!b) return 0;
+    if (a.includes(b)) return 1000 + b.length; // 文件名包含规则名：强匹配
+    if (b.includes(a)) return 900 + a.length; // 规则名包含文件名：次强
+    // 连续前缀重叠匹配（至少 4 字符才计）
+    let overlap = 0;
+    const max = Math.min(a.length, b.length);
+    while (overlap < max && a[overlap] === b[overlap]) overlap++;
+    return overlap >= 4 ? overlap : 0;
+  }, []);
+
+  // 用某条规则在浏览器端试解析当前文件，返回记录数与有校验错误的行数
+  const testRule = useCallback(
+    (rule: ParseRule): { count: number; errRows: number } => {
+      let all: OrderRecord[] = [];
+      if (parsedData.fileType === 'excel') {
+        const sheetsToProcess =
+          rule.sheetNames.length > 0
+            ? parsedData.sheets.filter((s) => rule.sheetNames.includes(s.sheetName))
+            : parsedData.sheets;
+        for (const sheet of sheetsToProcess) {
+          all.push(...executeParse(sheet.rows, sheet.headers, rule, undefined, sheet.sheetName));
+        }
+      } else {
+        const sheet = parsedData.sheets[0];
+        if (sheet) {
+          all = parsedData.rawText
+            ? executeParse(sheet.rows, sheet.headers, rule, parsedData.rawText)
+            : executeParse(sheet.rows, sheet.headers, rule);
+        }
+      }
+      const validated = validateRecords(all);
+      const errRows = validated.filter((r) => (r._errors?.length || 0) > 0).length;
+      return { count: all.length, errRows };
+    },
+    [parsedData]
+  );
+
+  // 直接应用 AI 规则并解析（先本地预校验，失败则自动改用匹配的可用规则）
   const handleApplyAiRule = useCallback(async () => {
     if (!aiResult?.rule) return;
 
-    const toastId = toast.loading('正在保存并应用规则...');
+    const toastId = toast.loading('正在校验并应用规则...');
     try {
+      // 1) 本地预校验：用 AI 规则试解析当前文件
+      const aiRuleFull = normalizeRule(aiResult.rule);
+      const aiTest = testRule(aiRuleFull);
+
+      if (aiTest.errRows > 0) {
+        // 2) AI 规则有错误：优先按「上传文件名」匹配已有规则（而非只看错误数）
+        const baseName = (parsedData.fileName || '').replace(/\.[^.]+$/, '');
+
+        const scored = rules
+          .filter((r) => r.fileType === parsedData.fileType)
+          .map((r) => ({ rule: r, score: nameScore(baseName, r.name), errRows: testRule(r).errRows }))
+          .filter((x) => x.score > 0)
+          .sort((a, b) => b.score - a.score);
+
+        // 2.1) 按名称匹配、且能零错误解析的规则：直接应用
+        const nameZero = scored.find((x) => x.errRows === 0);
+        if (nameZero) {
+          setAiValidation(aiTest);
+          toast.success(
+            `AI 规则解析出 ${aiTest.errRows} 处错误，已自动改用与文件名匹配的规则「${nameZero.rule.name}」（零错误）`,
+            { id: toastId, duration: 5000 }
+          );
+          await loadRules();
+          onRuleSelected(nameZero.rule);
+          return;
+        }
+
+        // 2.2) 没有名称匹配的规则：退回「错误最少」兜底，但同样要求零错误才通过
+        let best: { rule: ParseRule; errRows: number } | null = null;
+        for (const r of rules) {
+          if (r.fileType !== parsedData.fileType) continue;
+          const t = testRule(r);
+          if (!best || t.errRows < best.errRows) best = { rule: r, errRows: t.errRows };
+        }
+
+        if (best && best.errRows === 0) {
+          setAiValidation(aiTest);
+          toast.success(
+            `AI 规则解析出 ${aiTest.errRows} 处错误，已自动改用可用规则「${best.rule.name}」（零错误，未找到文件名匹配项）`,
+            { id: toastId, duration: 5000 }
+          );
+          await loadRules();
+          onRuleSelected(best.rule);
+          return;
+        }
+
+        // 2.3) 没有任何可零错误解析的匹配规则：不自动套用，提示手动微调
+        setAiValidation(aiTest);
+        const matchedNames = scored.map((x) => `「${x.rule.name}」(${x.errRows}错)`).join('、');
+        const tip = matchedNames
+          ? `命中的匹配规则 ${matchedNames} 仍存在错误`
+          : '且未找到与文件名匹配的已有规则';
+        toast.error(
+          `AI 规则解析出 ${aiTest.errRows} 处错误，${tip}，请点击"手动微调确认"修正后再应用`,
+          { id: toastId, duration: 6000 }
+        );
+        return;
+      }
+
+      // 3) 预校验通过：正常保存并应用
       const res = await fetch('/api/rules', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -113,7 +252,7 @@ export default function RuleSelector({ parsedData, onRuleSelected, selectedRule 
       console.error('[handleApplyAiRule] 异常:', err);
       toast.error(`操作失败: ${err instanceof Error ? err.message : '未知错误'}`, { id: toastId });
     }
-  }, [aiResult, onRuleSelected]);
+  }, [aiResult, rules, parsedData, onRuleSelected, normalizeRule, testRule, nameScore]);
 
   // 打开编辑器手动微调 AI 规则
   const handleEditAiRule = useCallback(() => {
@@ -174,8 +313,14 @@ export default function RuleSelector({ parsedData, onRuleSelected, selectedRule 
                 {/* 置信度展示 */}
                 <div className="flex items-center gap-3 flex-wrap mb-3">
                   <span className={`tag ${(aiResult.confidence?.overall || 0) >= 70 ? 'tag-primary' : (aiResult.confidence?.overall || 0) >= 50 ? 'tag-warning' : 'tag-danger'}`}>
-                    整体置信度: {aiResult.confidence?.overall || '--'}%
+                    模型自评置信度: {aiResult.confidence?.overall || '--'}%
                   </span>
+                  {aiParseTest && (
+                    <span className={`tag ${aiParseTest.errRows === 0 ? 'tag-primary' : 'tag-danger'}`}>
+                      实测置信度: {aiParseTest.count > 0 ? Math.round((1 - aiParseTest.errRows / aiParseTest.count) * 100) : 100}%
+                      （{aiParseTest.count} 条 / {aiParseTest.errRows} 错）
+                    </span>
+                  )}
                   {aiResult.confidence?.overall != null && aiResult.confidence.overall < 70 && (
                     <span className="text-xs text-[#d97b00]">⚠️ 部分映射为AI推测，建议手动确认</span>
                   )}
@@ -186,6 +331,16 @@ export default function RuleSelector({ parsedData, onRuleSelected, selectedRule 
                     {showAiDetail ? '收起分析' : '查看分析详情'}
                   </button>
                 </div>
+
+                {aiValidation && aiValidation.errRows > 0 && (
+                  <div className="mb-3 p-3 rounded-lg bg-[#fff1f0] border border-[#ffccc7] text-[#cf1322] text-sm">
+                    ⚠️ 该 AI 规则直接套用会解析出 <strong>{aiValidation.errRows}</strong> 处校验错误
+                    （常见于 storeName / skuCode / skuQuantity 缺失）。
+                    建议点击「手动微调确认」修正，或直接使用下方已有的可用规则。
+                    <button onClick={() => setAiValidation(null)} className="ml-2 underline">知道了</button>
+                  </div>
+                )}
+
 
                 {showAiDetail && (
                   <div className="mb-4 p-3 bg-white rounded-lg text-sm text-[#4e5969] whitespace-pre-wrap max-h-48 overflow-y-auto">
@@ -249,7 +404,7 @@ export default function RuleSelector({ parsedData, onRuleSelected, selectedRule 
                     ✅ 直接应用
                   </button>
                   <button
-                    onClick={() => { setAiResult(null); }}
+                    onClick={() => { setAiResult(null); setAiValidation(null); setAiParseTest(null); }}
                     className="btn btn-outline btn-sm"
                   >
                     重新生成

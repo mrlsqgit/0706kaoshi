@@ -120,7 +120,7 @@ export default function HomePage() {
           : parsedData.sheets;
 
         for (const sheet of sheetsToProcess) {
-          const parsed = executeParse(sheet.rows, sheet.headers, rule);
+          const parsed = executeParse(sheet.rows, sheet.headers, rule, undefined, sheet.sheetName);
           allRecords.push(...parsed);
         }
       } else {

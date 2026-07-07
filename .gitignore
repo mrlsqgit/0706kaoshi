@@ -37,3 +37,11 @@ next-env.d.ts
 .idea/
 *.swp
 *.swo
+
+# local logs
+dev.log
+devserver.log
+devserver_err.log
+
+# exam attachments (test data, not code)
+AI考试附件/

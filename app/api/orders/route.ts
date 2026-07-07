@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { getOrders, createOrders, checkDuplicateExternalCodes } from '@/lib/db';
+import { getOrders, createOrders, checkDuplicateExternalCodes, deleteOrdersByExternalCode, deleteOrdersByExternalCodePrefix, dedupOrders, truncateOrders } from '@/lib/db';
 import { OrderRecord } from '@/lib/types';
 
 /** 将请求体中的原始数据转换为 OrderRecord */
@@ -93,5 +93,44 @@ export async function POST(req: Request) {
     });
   } catch (err) {
     return NextResponse.json({ error: `提交运单失败: ${err}` }, { status: 500 });
+  }
+}
+
+/**
+ * DELETE /api/orders — 按外部编码删除运单（用于清理/去重）。
+ * 必须提供 externalCodePrefix（LIKE 前缀）或 externalCodes（精确列表）之一，禁止无差别清空。
+ */
+export async function DELETE(req: Request) {
+  try {
+    const body = await req.json().catch(() => ({})) as {
+      externalCodePrefix?: string;
+      externalCodes?: string[];
+      dedup?: boolean;
+      truncate?: boolean;
+    };
+    const { externalCodePrefix, externalCodes, dedup, truncate } = body;
+
+    if (truncate) {
+      const deleted = await truncateOrders();
+      return NextResponse.json({ success: true, deleted });
+    }
+    if (dedup) {
+      const removed = await dedupOrders();
+      return NextResponse.json({ success: true, removed });
+    }
+    if (externalCodes && Array.isArray(externalCodes) && externalCodes.length > 0) {
+      const deleted = await deleteOrdersByExternalCode(externalCodes);
+      return NextResponse.json({ success: true, deleted });
+    }
+    if (externalCodePrefix && externalCodePrefix.trim()) {
+      const deleted = await deleteOrdersByExternalCodePrefix(externalCodePrefix.trim());
+      return NextResponse.json({ success: true, deleted });
+    }
+    return NextResponse.json(
+      { error: '请提供 dedup / externalCodePrefix / externalCodes 之一' },
+      { status: 400 }
+    );
+  } catch (err) {
+    return NextResponse.json({ error: `删除运单失败: ${err}` }, { status: 500 });
   }
 }

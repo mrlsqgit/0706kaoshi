@@ -75,6 +75,7 @@ export type ProcessorType =
   | 'columnMapping'
   | 'skipRows'
   | 'tailInfoExtraction'
+  | 'headerInfoExtraction'
   | 'crossRowAggregation'
   | 'matrixTranspose'
   | 'cardDetection'
@@ -129,6 +130,16 @@ export interface TailInfoExtractionOptions {
   }[];
 }
 
+// 顶部信息提取配置（提取被 headerRowsToSkip 跳过的表头/标题行中的字段，如收货门店）
+export interface HeaderInfoExtractionOptions {
+  headerRowsCount: number;
+  fieldMappings: {
+    targetField: OrderField;
+    keywordPattern: string;
+    extractPattern: string;
+  }[];
+}
+
 // 跨行聚合配置
 export interface CrossRowAggregationOptions {
   groupByField: OrderField;
@@ -143,13 +154,21 @@ export interface MatrixTransposeOptions {
   cellSplitItemFormat?: string;
 }
 
-// 卡片检测配置
+// 卡片检测配置（支持一对多：1个收货信息 + N个SKU商品行）
 export interface CardDetectionOptions {
   cardStartKeyword: string;
+  // 键值对字段提取（用于提取收货信息等）
   internalFieldPatterns: {
     targetField: OrderField;
     keyword: string;
     extractPattern?: string;
+  }[];
+  // 子表头检测关键词（如 ["物品编码", "SKU编码", "产品编码"]），匹配到后后续行为商品数据
+  subHeaderKeywords?: string[];
+  // 商品数据列映射（子表头列名 → 目标字段）；不配置时 fallback 到规则的全局 columnMappings
+  skuColumnMappings?: {
+    sourceColumn: string;
+    targetField: OrderField;
   }[];
 }
 
@@ -174,6 +193,16 @@ export interface TextParsingOptions {
 export interface MultiOrderSplitOptions {
   orderSeparator: string;
   orderNamePattern?: string;
+}
+
+// 多Sheet处理配置（每个Sheet代表一个门店/订单）
+export interface MultiSheetOptions {
+  /** 从 Sheet 名称提取到目标字段的映射 */
+  sheetNameFieldMappings: {
+    targetField: OrderField;
+    /** 可选：从 Sheet 名中用正则提取，不填则使用完整 Sheet 名 */
+    extractPattern?: string;
+  }[];
 }
 
 // ====== 批量下单提交结果 ======

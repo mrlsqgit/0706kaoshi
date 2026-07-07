@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import { FixedSizeList as List } from 'react-window';
 import AutoSizer from 'react-virtualized-auto-sizer';
 import { OrderRecord, ORDER_FIELD_LABELS, OrderField } from '@/lib/types';
@@ -42,7 +42,10 @@ interface DataPreviewTableProps {
 export default function DataPreviewTable({ records, onChange, existingCodes }: DataPreviewTableProps) {
   const [editCell, setEditCell] = useState<{ row: number; field: OrderField } | null>(null);
   const [editValue, setEditValue] = useState('');
+  const [mounted, setMounted] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => { setMounted(true); }, []);
 
   const handleCellClick = useCallback((rowIndex: number, field: OrderField) => {
     const record = records[rowIndex];
@@ -128,7 +131,10 @@ export default function DataPreviewTable({ records, onChange, existingCodes }: D
   };
 
   const useVirtual = records.length > VIRTUAL_THRESHOLD;
-  const tableHeight = Math.min(records.length * ROW_HEIGHT, window.innerHeight * 0.55);
+  const tableHeight = useMemo(
+    () => mounted ? Math.min(records.length * ROW_HEIGHT, window.innerHeight * 0.55) : records.length * ROW_HEIGHT,
+    [mounted, records.length]
+  );
 
   // 渲染单行（用于虚拟列表）
   const renderRow = useCallback(({ index, style }: { index: number; style: React.CSSProperties }) => {

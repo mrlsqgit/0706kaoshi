@@ -1,10 +1,7 @@
 import type { Metadata } from 'next';
-import { Inter } from 'next/font/google';
 import './globals.css';
 import { Toaster } from 'react-hot-toast';
 import NavBar from '@/components/NavBar';
-
-const inter = Inter({ subsets: ['latin'] });
 
 export const metadata: Metadata = {
   title: '万能导入 V2 - 智能多格式批量下单系统',
@@ -38,7 +35,7 @@ export default function RootLayout({
 }) {
   return (
     <html lang="zh-CN">
-      <body className={inter.className}>
+      <body className="font-sans antialiased">
         <DbStatusIndicator />
         <NavBar />
         <main className="min-h-screen bg-[#f7f8fa] py-6 px-4">

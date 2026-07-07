@@ -8,12 +8,14 @@ import {
   ColumnMapping,
   ProcessorConfig,
   TailInfoExtractionOptions,
+  HeaderInfoExtractionOptions,
   CrossRowAggregationOptions,
   MatrixTransposeOptions,
   CardDetectionOptions,
   TextParsingOptions,
   MultiOrderSplitOptions,
   CompositeCellSplitOptions,
+  MultiSheetOptions,
 } from './types';
 
 // ====== 工具函数 ======
@@ -97,7 +99,7 @@ function applyColumnMappings(
     for (const mapping of mappings) {
       let value = '';
 
-      switch (mapping.sourceType) {
+      switch (mapping.sourceType || 'column') {
         case 'column':
           value = extractField(row, mapping.sourceColumn ?? '', headers);
           break;
@@ -145,20 +147,81 @@ function processTailInfoExtraction(
     for (const row of tailRows) {
       const rowText = Object.values(row).map(v => String(v ?? '')).join(' ').trim();
       if (new RegExp(mapping.keywordPattern, 'i').test(rowText)) {
-        tailInfo[mapping.targetField] = extractByPattern(rowText, mapping.extractPattern);
-        break;
-      }
-      // 也检查第一列是否包含关键词
-      const firstCol = Object.values(row)[0];
-      if (firstCol != null && new RegExp(mapping.keywordPattern, 'i').test(String(firstCol))) {
-        const fullText = Object.values(row).slice(1).map(v => String(v ?? '')).join(' ').trim();
-        tailInfo[mapping.targetField] = fullText || extractByPattern(rowText, mapping.extractPattern);
+        // 策略1：检查是否第一列匹配关键词 → 取第二列作为值（交替KV格式）
+        const firstCol = Object.values(row)[0];
+        if (firstCol != null && new RegExp(mapping.keywordPattern, 'i').test(String(firstCol))) {
+          const cells = Object.values(row).slice(1).map(v => String(v ?? '').trim());
+          // 取第一个非空值作为目标字段值，但如果后面还有已知关键词，则停止
+          const otherPatterns = options.fieldMappings.filter(
+            m => m.keywordPattern !== mapping.keywordPattern
+          );
+          for (const cell of cells) {
+            if (!cell) continue;
+            // 检查该单元格是否包含其他关键词（避免串值）
+            const isOtherKey = otherPatterns.some(
+              p => new RegExp(p.keywordPattern, 'i').test(cell)
+            );
+            if (!isOtherKey) {
+              tailInfo[mapping.targetField] = cell;
+              break;
+            }
+          }
+          // 如果策略1提取成功，跳出
+          if (tailInfo[mapping.targetField]) break;
+        }
+        // 策略2：正则提取（fallback）
+        if (!tailInfo[mapping.targetField]) {
+          tailInfo[mapping.targetField] = extractByPattern(rowText, mapping.extractPattern);
+        }
         break;
       }
     }
   }
 
   return tailInfo;
+}
+
+/** 顶部信息提取（扫描被 headerRowsToSkip 跳过的表头/标题行） */
+function processHeaderInfoExtraction(
+  allRows: Record<string, unknown>[],
+  options: HeaderInfoExtractionOptions
+): Record<string, string> {
+  const headerInfo: Record<string, string> = {};
+  const headerRows = allRows.slice(0, Math.max(0, options.headerRowsCount));
+
+  for (const mapping of options.fieldMappings) {
+    for (const row of headerRows) {
+      const rowText = Object.values(row).map(v => String(v ?? '')).join(' ').trim();
+      if (new RegExp(mapping.keywordPattern, 'i').test(rowText)) {
+        // 策略1：第一列匹配关键词 → 取第二列作为值（交替 KV 格式）
+        const firstCol = Object.values(row)[0];
+        if (firstCol != null && new RegExp(mapping.keywordPattern, 'i').test(String(firstCol))) {
+          const cells = Object.values(row).slice(1).map(v => String(v ?? '').trim());
+          const otherPatterns = options.fieldMappings.filter(
+            m => m.keywordPattern !== mapping.keywordPattern
+          );
+          for (const cell of cells) {
+            if (!cell) continue;
+            const isOtherKey = otherPatterns.some(
+              p => new RegExp(p.keywordPattern, 'i').test(cell)
+            );
+            if (!isOtherKey) {
+              headerInfo[mapping.targetField] = cell;
+              break;
+            }
+          }
+          if (headerInfo[mapping.targetField]) break;
+        }
+        // 策略2：正则提取（fallback）
+        if (!headerInfo[mapping.targetField]) {
+          headerInfo[mapping.targetField] = extractByPattern(rowText, mapping.extractPattern);
+        }
+        break;
+      }
+    }
+  }
+
+  return headerInfo;
 }
 
 /** 跨行聚合 */
@@ -263,53 +326,231 @@ function processMatrixTranspose(
   return result;
 }
 
-/** 卡片检测 */
+/** 卡片检测（增强版：支持一对多 —— 1个收货信息 + N个SKU商品行展开） */
 function processCardDetection(
   allRows: Record<string, unknown>[],
   options: CardDetectionOptions
-): { records: Record<string, unknown>[][]; cardInfos: Record<string, string>[] } {
+): {
+  records: Record<string, unknown>[][];   // 每个卡片的原始行
+  cardInfos: Record<string, string>[];    // 每个卡片提取的键值对信息（storeName/receiverName 等）
+  skuDataList: {                         // 每个卡片的商品数据行列表
+    headers: string[];                   // 子表头
+    rows: Record<string, unknown>[];     // 商品数据行
+  }[];
+} {
   const cards: Record<string, unknown>[][] = [];
   const cardInfos: Record<string, string>[] = [];
+  const skuDataList: { headers: string[]; rows: Record<string, unknown>[] }[] = [];
   let currentCard: Record<string, unknown>[] = [];
+  let started = false;
 
   for (const row of allRows) {
     const rowText = Object.values(row).map(v => String(v ?? '')).join(' ').trim();
 
+    // 检测新卡片开始
     if (new RegExp(options.cardStartKeyword, 'i').test(rowText)) {
-      if (currentCard.length > 0) {
+      if (started && currentCard.length > 0) {
+        // 结束上一个卡片：提取信息和商品数据
         cards.push(currentCard);
+        cardInfos.push(extractCardInfo(currentCard, options.internalFieldPatterns));
+        skuDataList.push(extractSkuData(currentCard, options));
       }
       currentCard = [];
+      started = true;
       continue;
     }
+
+    // 第一个卡片起始标记之前的行（标题/说明）直接忽略
+    if (!started) continue;
 
     currentCard.push(row);
   }
 
+  // 处理最后一个卡片
   if (currentCard.length > 0) {
     cards.push(currentCard);
+    cardInfos.push(extractCardInfo(currentCard, options.internalFieldPatterns));
+    skuDataList.push(extractSkuData(currentCard, options));
   }
 
-  // 为每个卡片解析内部字段
-  for (const cardRows of cards) {
-    const info: Record<string, string> = {};
-    for (const mapping of options.internalFieldPatterns) {
-      for (const row of cardRows) {
-        const rowText = Object.values(row).map(v => String(v ?? '')).join(' ').trim();
-        if (new RegExp(mapping.keyword, 'i').test(rowText)) {
-          if (mapping.extractPattern) {
-            info[mapping.targetField] = extractByPattern(rowText, mapping.extractPattern);
-          } else {
-            info[mapping.targetField] = rowText.replace(new RegExp(mapping.keyword, 'i'), '').trim();
+  return { records: cards, cardInfos, skuDataList };
+}
+
+/** 从卡片行中提取键值对字段信息（支持交替 KV 格式和非交替格式） */
+function extractCardInfo(
+  cardRows: Record<string, unknown>[],
+  patterns: { targetField: OrderField; keyword: string; extractPattern?: string }[]
+): Record<string, string> {
+  const info: Record<string, string> = {};
+  for (const mapping of patterns) {
+    for (const row of cardRows) {
+      const cells = Object.values(row).map(v => String(v ?? ''));
+      const rowText = cells.join(' ').trim();
+
+      if (!new RegExp(mapping.keyword, 'i').test(rowText)) continue;
+
+      let extracted = '';
+
+      // 策略1：使用 extractPattern 正则捕获
+      if (mapping.extractPattern) {
+        extracted = extractByPattern(rowText, mapping.extractPattern);
+      }
+      // 策略2：按列取位置（交替KV格式：key在偶数列，value在奇数列）
+      if (!extracted) {
+        for (let j = 0; j < cells.length - 1; j++) {
+          if (new RegExp(mapping.keyword, 'i').test(cells[j].trim())) {
+            // key 的下一个非空单元格就是 value
+            for (let k = j + 1; k < cells.length; k++) {
+              const candidate = cells[k].trim();
+              if (candidate) {
+                // 排除这个候选看起来像另一个 key 的情况
+                const looksLikeKey = patterns.some(
+                  p => p.keyword !== mapping.keyword && new RegExp(p.keyword, 'i').test(candidate)
+                );
+                if (!looksLikeKey) {
+                  extracted = candidate;
+                }
+                break;
+              }
+            }
+            break;
           }
+        }
+      }
+      // 策略3：全文去除关键词（兜底策略，但排除其他已知关键词）
+      if (!extracted) {
+        extracted = rowText.replace(new RegExp(mapping.keyword, 'i'), '').trim();
+        // 移除后面可能跟的其他 key
+        for (const p of patterns) {
+          extracted = extracted.replace(new RegExp(p.keyword, 'i'), '').trim();
+        }
+      }
+
+      // 策略4：如果没有已知 patterns，取第2列作为值
+      if (!extracted && patterns.length === 0) {
+        for (let k = 1; k < cells.length; k++) {
+          const candidate = cells[k].trim();
+          if (candidate) {
+            extracted = candidate;
+            break;
+          }
+        }
+      }
+
+      if (extracted) {
+        info[mapping.targetField] = extracted;
+        break; // 找到后跳出当前卡片行循环
+      }
+    }
+  }
+  return info;
+}
+
+/** 从卡片行中检测子表头并提取商品数据行（支持自动检测回落） */
+function extractSkuData(
+  cardRows: Record<string, unknown>[],
+  options: CardDetectionOptions
+): { headers: string[]; rows: Record<string, unknown>[] } {
+  const defaultResult = { headers: [], rows: [] };
+
+  // 常见的键值对信息关键词（第一列包含这些是收货信息行，不是子表头）
+  const kvKeywords = ['门店', '店', '收货', '电话', '地址', '人', '单号', '仓库', '日期', '备注', '出库'];
+
+  // 尝试找到子表头行
+  let headerIdx = -1;
+
+  // 方法1：用配置的 subHeaderKeywords 匹配
+  const keywords = options.subHeaderKeywords || [];
+  if (keywords.length > 0) {
+    for (let i = 0; i < cardRows.length; i++) {
+      const firstColVal = String(Object.values(cardRows[i])[0] ?? '');
+      for (const kw of keywords) {
+        if (new RegExp(kw, 'i').test(firstColVal)) {
+          headerIdx = i;
+          break;
+        }
+      }
+      if (headerIdx >= 0) break;
+    }
+  }
+
+  // 方法2：自动检测回落 —— 找到第一行不是键值对信息、且包含多个非空值的行作为子表头
+  if (headerIdx < 0) {
+    for (let i = 0; i < cardRows.length; i++) {
+      const row = cardRows[i];
+      const rowText = Object.values(row).map(v => String(v ?? '')).join(' ').trim();
+      if (!rowText) continue; // 跳过空行
+
+      const firstCol = String(Object.values(row)[0] ?? '').trim();
+      // 跳过明显的键值对信息行
+      const isKvRow = kvKeywords.some(kw => firstCol.includes(kw));
+      if (isKvRow) continue;
+
+      // 跳过可能的分隔符/标题行
+      if (/^(▶|▸|●|○|第|part|section)/i.test(firstCol) ||
+          /^(调拨单|出库单|配送单|汇总)/i.test(rowText)) {
+        continue;
+      }
+
+      // 候选子表头：第一列非空 且 有至少1个非空后续列（至少是2列表格）
+      const nonEmptyCount = Object.values(row).filter(
+        v => String(v ?? '').trim() !== ''
+      ).length;
+
+      // 卡片式布局中，子表头行通常有2-6个非空列
+      if (nonEmptyCount >= 2 && nonEmptyCount <= 8) {
+        // 额外检查：下面紧跟的行看起来像数据行（有至少2个非空值）
+        let nextHasData = false;
+        for (let j = i + 1; j < Math.min(i + 3, cardRows.length); j++) {
+          const nextNonEmpty = Object.values(cardRows[j]).filter(
+            v => String(v ?? '').trim() !== ''
+          ).length;
+          if (nextNonEmpty >= 2) {
+            nextHasData = true;
+            break;
+          }
+        }
+        if (nextHasData) {
+          headerIdx = i;
           break;
         }
       }
     }
-    cardInfos.push(info);
   }
 
-  return { records: cards, cardInfos };
+  if (headerIdx < 0) {
+    return defaultResult;
+  }
+
+  // 子表头就是该行的 values
+  const subHeaders = Object.values(cardRows[headerIdx]).map((v, idx) => {
+    const strVal = String(v ?? '').trim();
+    return strVal || `Col_${idx}`;
+  });
+
+  // 商品数据行 = 表头之后的所有非空行（直到下一个卡片或末尾）
+  const dataRows: Record<string, unknown>[] = [];
+  for (let i = headerIdx + 1; i < cardRows.length; i++) {
+    const row = cardRows[i];
+    const rowText = Object.values(row).map(v => String(v ?? '')).join(' ').trim();
+    if (!rowText) continue;
+    // 跳过汇总行
+    if (/^(合计|小计|总计|sum|total)$/i.test(rowText)) continue;
+    // 如果又出现了键值对关键词，说明进入了下一个信息段，停止
+    const firstCol = String(Object.values(row)[0] ?? '').trim();
+    const isKvRow = kvKeywords.some(kw => firstCol.includes(kw));
+    if (isKvRow) break;
+
+    // 用子表头重建行对象
+    const values = Object.values(row);
+    const newRow: Record<string, unknown> = {};
+    for (let j = 0; j < subHeaders.length && j < values.length; j++) {
+      newRow[subHeaders[j]] = values[j];
+    }
+    dataRows.push(newRow);
+  }
+
+  return { headers: subHeaders, rows: dataRows };
 }
 
 /** 文本解析（Word/PDF 纯文本） */
@@ -318,9 +559,19 @@ function processTextParsing(
   options: TextParsingOptions
 ): Record<string, string>[] {
   const records: Record<string, string>[] = [];
-  const parts = text.split(new RegExp(options.recordSeparator)).filter(s => s.trim());
+  const sep = options.recordSeparator || '';
+  const parts = text.split(new RegExp(sep)).filter(s => s.trim());
+
+  // 对于正向预查型分隔符（如 "(?=ZBWP\d+)"），被分割出的片段仍保留锚点文本；
+  // 但首部/尾部的说明文字（不含锚点）也会被切成一个片段，应剔除，避免产生空记录。
+  let anchorRe: RegExp | null = null;
+  if (sep && /^\(\?=/.test(sep)) {
+    const m = sep.match(/^\(\?=(.*)\)$/s);
+    if (m) anchorRe = new RegExp(m[1]);
+  }
 
   for (const part of parts) {
+    if (anchorRe && !anchorRe.test(part)) continue; // 不含锚点（如文件头）的片段跳过
     const record: Record<string, string> = {};
     for (const fp of options.fieldPatterns) {
       try {
@@ -416,64 +667,109 @@ function processMultiOrderSplit(
   return parts.map(part => part.trim());
 }
 
+/** 多Sheet处理：从 Sheet 名称提取字段值注入到每条记录 */
+function processMultiSheet(
+  records: Omit<OrderRecord, 'id' | 'batchId' | 'createdAt' | '_rowIndex' | '_errors' | '_duplicateWith'>[],
+  options: MultiSheetOptions,
+  sheetName: string
+): typeof records {
+  if (!sheetName || !options.sheetNameFieldMappings?.length) return records;
+
+  const sheetInfo: Record<string, string> = {};
+  for (const mapping of options.sheetNameFieldMappings) {
+    if (mapping.extractPattern) {
+      sheetInfo[mapping.targetField] = extractByPattern(sheetName, mapping.extractPattern);
+    } else {
+      sheetInfo[mapping.targetField] = sheetName.trim();
+    }
+  }
+
+  return records.map(rec => ({ ...rec, ...sheetInfo }));
+}
+
 // ====== 主解析函数 ======
 
 export function executeParse(
   rawRows: Record<string, unknown>[],
   headers: string[],
   rule: ParseRule,
-  rawText?: string
+  rawText?: string,
+  sheetName?: string
 ): Omit<OrderRecord, 'id' | 'batchId' | 'createdAt' | '_rowIndex' | '_errors' | '_duplicateWith'>[] {
   let rows = [...rawRows];
   const tailInfo: Record<string, string> = {};
+  const headerInfo: Record<string, string> = {};
 
-  // 1. 跳过头部/尾部
-  rows = skipHeaderRows(rows, rule.headerRowsToSkip);
+  // 0. Header 重定向（修复核心问题）：
+  //    file-parsers.ts 固定用 Excel 第1行作为 headers，
+  //    但当第1行是说明/标题行时（如湖南仓.xlsx），需要用后续某行作为真正的表头。
+  //    当 headerRowsToSkip=N 时，意味着前N行都是标题/说明，第N+1行才是真正表头。
+  //    由于 file-parsers 已把第1行当作 headers、第2行起作为 rows[0]，
+  //    所以 rawRows[N-1] 就是真正的表头行，其 values 应成为新的 headers。
+  if (rule.headerRowsToSkip > 0 && rule.headerRowsToSkip <= rawRows.length) {
+    const realHeaderRow = rawRows[rule.headerRowsToSkip - 1];
+    const newHeaders: string[] = Object.values(realHeaderRow).map((v, i) => {
+      const strVal = String(v ?? '').trim().replace(/\*/g, '');
+      return strVal || `Column_${i}`;
+    });
+
+    // 用新 headers 重建数据行（从真正表头的下一行开始）
+    const dataStartIdx = rule.headerRowsToSkip;
+    if (dataStartIdx < rawRows.length) {
+      rows = rawRows.slice(dataStartIdx).map((oldRow) => {
+        const oldValues = Object.values(oldRow);
+        const newRow: Record<string, unknown> = {};
+        for (let i = 0; i < newHeaders.length; i++) {
+          newRow[newHeaders[i]] = i < oldValues.length ? oldValues[i] : '';
+        }
+        return newRow;
+      });
+    } else {
+      rows = [];
+    }
+
+    // 替换 headers，后续列映射将使用正确的列名
+    headers = newHeaders;
+  }
+
+  // 1. 跳过头部/尾部（header重定向后通常不需要再额外跳过，但保留以兼容）
+  rows = skipHeaderRows(rows, 0); // 已在上面处理完 header 跳过
   rows = skipFooterRows(rows, rule.footerRowsToSkip);
 
   // 2. 跳过汇总/空行
   rows = skipSummaryAndEmpty(rows, rule);
 
-  // 2b. 多订单拆分（在处理前将 rawText 拆为多份）
-  if (rawText) {
-    const multiOrderProc = rule.processors.find(
-      p => p.enabled && p.type === 'multiOrderSplit'
-    );
-    if (multiOrderProc) {
-      const opts = multiOrderProc.options as unknown as MultiOrderSplitOptions;
-      const orderTexts = processMultiOrderSplit(rawText, opts);
-      // 对每份订单文本使用 textParsing 或逐份解析
-      const textProc = rule.processors.find(
-        p => p.enabled && p.type === 'textParsing'
-      );
-      if (textProc) {
-        const textOpts = textProc.options as unknown as TextParsingOptions;
-        const allRecords: Omit<OrderRecord, 'id' | 'batchId' | 'createdAt' | '_rowIndex' | '_errors' | '_duplicateWith'>[] = [];
-        for (const orderText of orderTexts) {
-          const parsed = processTextParsing(orderText, textOpts);
-          allRecords.push(...parsed as unknown as Omit<OrderRecord, 'id' | 'batchId' | 'createdAt' | '_rowIndex' | '_errors' | '_duplicateWith'>[]);
-        }
-        return allRecords;
-      }
-    }
-  }
+  // 2b/2c. 文本解析（Word/PDF）：先解析出 SKU 记录，尾部信息（收货人/地址等）
+  //          稍后在第 6 步统一合并到每条记录，因此此处不再提前 return。
+  let textParsed = false;
+  let needsCardMode = false;
+  let processedRecords: Omit<OrderRecord, 'id' | 'batchId' | 'createdAt' | '_rowIndex' | '_errors' | '_duplicateWith'>[] = [];
 
-  // 2c. 纯文本解析（Word/PDF 单订单场景）
   if (rawText) {
     const textProc = rule.processors.find(
       p => p.enabled && p.type === 'textParsing'
     );
     if (textProc) {
       const opts = textProc.options as unknown as TextParsingOptions;
-      const parsed = processTextParsing(rawText, opts);
-      return parsed as unknown as Omit<OrderRecord, 'id' | 'batchId' | 'createdAt' | '_rowIndex' | '_errors' | '_duplicateWith'>[];
+      const multiOrderProc = rule.processors.find(
+        p => p.enabled && p.type === 'multiOrderSplit'
+      );
+      if (multiOrderProc) {
+        const mOpts = multiOrderProc.options as unknown as MultiOrderSplitOptions;
+        const orderTexts = processMultiOrderSplit(rawText, mOpts);
+        const all: Omit<OrderRecord, 'id' | 'batchId' | 'createdAt' | '_rowIndex' | '_errors' | '_duplicateWith'>[] = [];
+        for (const orderText of orderTexts) {
+          all.push(...(processTextParsing(orderText, opts) as unknown as Omit<OrderRecord, 'id' | 'batchId' | 'createdAt' | '_rowIndex' | '_errors' | '_duplicateWith'>[]));
+        }
+        processedRecords = all;
+      } else {
+        processedRecords = processTextParsing(rawText, opts) as unknown as Omit<OrderRecord, 'id' | 'batchId' | 'createdAt' | '_rowIndex' | '_errors' | '_duplicateWith'>[];
+      }
+      textParsed = true;
     }
   }
 
   // 3. 执行处理器
-  let needsCardMode = false;
-  let processedRecords: Omit<OrderRecord, 'id' | 'batchId' | 'createdAt' | '_rowIndex' | '_errors' | '_duplicateWith'>[] = [];
-
   for (const proc of rule.processors) {
     if (!proc.enabled) continue;
 
@@ -481,6 +777,12 @@ export function executeParse(
       case 'tailInfoExtraction': {
         const opts = proc.options as unknown as TailInfoExtractionOptions;
         Object.assign(tailInfo, processTailInfoExtraction(rawRows, opts));
+        break;
+      }
+
+      case 'headerInfoExtraction': {
+        const opts = proc.options as unknown as HeaderInfoExtractionOptions;
+        Object.assign(headerInfo, processHeaderInfoExtraction(rawRows, opts));
         break;
       }
 
@@ -498,13 +800,33 @@ export function executeParse(
       case 'cardDetection': {
         needsCardMode = true;
         const opts = proc.options as unknown as CardDetectionOptions;
-        const { records: cardRows, cardInfos } = processCardDetection(rawRows, opts);
+        const { cardInfos, skuDataList } = processCardDetection(rawRows, opts);
         processedRecords = [];
-        for (let i = 0; i < cardRows.length; i++) {
-          const cardMapped = applyColumnMappings(cardRows[i], rule.columnMappings, headers);
-          for (const rec of cardMapped) {
-            const merged = { ...rec, ...cardInfos[i] };
-            processedRecords.push(merged);
+
+        // 使用 SKU 列映射（优先用 skuColumnMappings，fallback 到全局 columnMappings）
+        const skuMappings = opts.skuColumnMappings && opts.skuColumnMappings.length > 0
+          ? opts.skuColumnMappings
+          : rule.columnMappings;
+
+        for (let i = 0; i < skuDataList.length; i++) {
+          const { headers: subHeaders, rows: skuRows } = skuDataList[i];
+          const info = cardInfos[i] || {};
+
+          if (skuRows.length === 0) {
+            // 没有商品数据行，生成一条只有收货信息的记录
+            processedRecords.push({ ...info });
+            continue;
+          }
+
+          // 对每个商品数据行：应用列映射 + 合并收货信息 → 一条记录
+          for (const skuRow of skuRows) {
+            // 将单行商品数据转为数组以使用 applyColumnMappings
+            const mapped = applyColumnMappings([skuRow], skuMappings, subHeaders);
+            if (mapped.length > 0) {
+              // 合并：收货信息 + 商品字段
+              const merged = { ...info, ...mapped[0] };
+              processedRecords.push(merged);
+            }
           }
         }
         break;
@@ -519,11 +841,23 @@ export function executeParse(
         processedRecords = processCompositeCellSplit(processedRecords, opts);
         break;
       }
+
+      case 'multiSheet': {
+        // 从 Sheet 名称提取字段值（如 storeName = Sheet名）
+        if (processedRecords.length === 0) {
+          processedRecords = applyColumnMappings(rows, rule.columnMappings, headers);
+        }
+        const opts = proc.options as unknown as MultiSheetOptions;
+        if (sheetName) {
+          processedRecords = processMultiSheet(processedRecords, opts, sheetName);
+        }
+        break;
+      }
     }
   }
 
   // 4. 如果没有特殊处理器，直接列映射
-  if (!needsCardMode && processedRecords.length === 0) {
+  if (!textParsed && !needsCardMode && processedRecords.length === 0) {
     processedRecords = applyColumnMappings(rows, rule.columnMappings, headers);
   }
 
@@ -536,7 +870,13 @@ export function executeParse(
     }
   }
 
-  // 6. 注入尾部提取的信息到每条记录
+  // 6. 注入顶部/尾部提取的信息到每条记录（顶部先注入，尾部后注入，冲突时尾部优先）
+  if (Object.keys(headerInfo).length > 0) {
+    processedRecords = processedRecords.map((rec) => ({
+      ...rec,
+      ...headerInfo,
+    }));
+  }
   if (Object.keys(tailInfo).length > 0) {
     processedRecords = processedRecords.map((rec) => ({
       ...rec,

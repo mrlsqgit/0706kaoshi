@@ -103,7 +103,11 @@ export default function RuleEditorModal({ rule, onSave, onClose }: RuleEditorMod
         defaultOptions = { rowIdentifierFields: ['skuName'], columnHeaderStartIndex: 2, columnValueField: 'storeName' };
         break;
       case 'cardDetection':
-        defaultOptions = { cardStartKeyword: '▶', internalFieldPatterns: [] };
+        defaultOptions = {
+          cardStartKeyword: '▶ 调拨记录',
+          internalFieldPatterns: [],
+          subHeaderKeywords: ['物品编码', 'SKU编码', '产品编码'],
+        };
         break;
       case 'compositeCellSplit':
         defaultOptions = { cellSeparator: '\\n', nameQtyPattern: '(.+?)[xX×](\\d+)', skipFields: ['storeName', 'externalCode'] };
@@ -113,6 +117,9 @@ export default function RuleEditorModal({ rule, onSave, onClose }: RuleEditorMod
         break;
       case 'textParsing':
         defaultOptions = { recordSeparator: '---+', fieldPatterns: [] };
+        break;
+      case 'multiSheet':
+        defaultOptions = { sheetNameFieldMappings: [{ targetField: 'storeName' as OrderField }] };
         break;
     }
     processors.push({ type, enabled: true, options: defaultOptions });
@@ -166,7 +173,8 @@ export default function RuleEditorModal({ rule, onSave, onClose }: RuleEditorMod
           sheet.rows,
           sheet.headers,
           testRule,
-          parsedData.rawText
+          parsedData.rawText,
+          sheet.sheetName
         );
         allRecords.push(...parsed);
       }
@@ -434,6 +442,7 @@ export default function RuleEditorModal({ rule, onSave, onClose }: RuleEditorMod
                   { type: 'compositeCellSplit' as const, label: '复合单元格拆分' },
                   { type: 'multiOrderSplit' as const, label: '多订单拆分' },
                   { type: 'textParsing' as const, label: '文本解析' },
+                  { type: 'multiSheet' as const, label: '多Sheet处理(门店名)' },
                 ].map(p => (
                   <button
                     key={p.type}
@@ -470,6 +479,7 @@ export default function RuleEditorModal({ rule, onSave, onClose }: RuleEditorMod
                               {proc.type === 'compositeCellSplit' && '复合单元格拆分'}
                               {proc.type === 'multiOrderSplit' && '多订单拆分'}
                               {proc.type === 'textParsing' && '文本解析'}
+                              {proc.type === 'multiSheet' && '多Sheet处理(门店名)'}
                             </span>
                           </label>
                         </div>
@@ -538,15 +548,27 @@ export default function RuleEditorModal({ rule, onSave, onClose }: RuleEditorMod
                             </div>
                           )}
                           {proc.type === 'cardDetection' && (
-                            <div>
-                              <label className="text-xs text-[#86909c]">卡片起始标识关键词</label>
-                              <input
-                                type="text"
-                                value={String((proc.options as Record<string, unknown>).cardStartKeyword || '▶')}
-                                onChange={e => updateProcessorOptions(idx, { ...proc.options, cardStartKeyword: e.target.value })}
-                                className="form-input text-sm"
-                                placeholder="例如: ▶ 调拨记录"
-                              />
+                            <div className="grid grid-cols-2 gap-3">
+                              <div>
+                                <label className="text-xs text-[#86909c]">卡片起始标识关键词</label>
+                                <input
+                                  type="text"
+                                  value={String((proc.options as Record<string, unknown>).cardStartKeyword || '▶ 调拨记录')}
+                                  onChange={e => updateProcessorOptions(idx, { ...proc.options, cardStartKeyword: e.target.value })}
+                                  className="form-input text-sm"
+                                  placeholder="例如: ▶ 调拨记录"
+                                />
+                              </div>
+                              <div>
+                                <label className="text-xs text-[#86909c]">子表头关键词（逗号分隔）</label>
+                                <input
+                                  type="text"
+                                  value={String(((proc.options as Record<string, unknown>).subHeaderKeywords as string[] || ['物品编码']).join(', '))}
+                                  onChange={e => updateProcessorOptions(idx, { ...proc.options, subHeaderKeywords: e.target.value.split(/[,，]/).map(s => s.trim()).filter(Boolean) })}
+                                  className="form-input text-sm"
+                                  placeholder="例如: 物品编码, SKU编码"
+                                />
+                              </div>
                             </div>
                           )}
                           {proc.type === 'compositeCellSplit' && (
@@ -594,6 +616,58 @@ export default function RuleEditorModal({ rule, onSave, onClose }: RuleEditorMod
                                 className="form-input text-sm"
                                 placeholder="如 ----"
                               />
+                            </div>
+                          )}
+                          {proc.type === 'multiSheet' && (
+                            <div>
+                              <p className="text-xs text-[#0b6e6e] mb-2 font-medium">从 Sheet 名称提取字段值（适用于每个Sheet代表一个门店的出库单）</p>
+                              <div className="space-y-2">
+                                {(((proc.options as Record<string, unknown>).sheetNameFieldMappings) as Array<{ targetField: OrderField; extractPattern?: string }> || []).map((mapping, mi) => (
+                                  <div key={mi} className="flex items-center gap-2">
+                                    <select
+                                      value={mapping.targetField}
+                                      onChange={e => {
+                                        const mappings = [...(((proc.options as Record<string, unknown>).sheetNameFieldMappings) as Array<{ targetField: OrderField; extractPattern?: string }> || [])];
+                                        mappings[mi] = { ...mappings[mi], targetField: e.target.value as OrderField };
+                                        updateProcessorOptions(idx, { ...proc.options, sheetNameFieldMappings: mappings });
+                                      }}
+                                      className="form-input form-select text-sm w-36"
+                                    >
+                                      {COLUMN_MAPPING_FIELDS.map(f => (
+                                        <option key={f} value={f}>{ORDER_FIELD_LABELS[f]}</option>
+                                      ))}
+                                    </select>
+                                    <label className="text-xs text-[#86909c] whitespace-nowrap">= Sheet名</label>
+                                    <input
+                                      type="text"
+                                      value={mapping.extractPattern || ''}
+                                      onChange={e => {
+                                        const mappings = [...(((proc.options as Record<string, unknown>).sheetNameFieldMappings) as Array<{ targetField: OrderField; extractPattern?: string }> || [])];
+                                        mappings[mi] = { ...mappings[mi], extractPattern: e.target.value };
+                                        updateProcessorOptions(idx, { ...proc.options, sheetNameFieldMappings: mappings });
+                                      }}
+                                      className="form-input text-sm flex-1"
+                                      placeholder="可选正则提取，留空则用完整Sheet名"
+                                    />
+                                    <button
+                                      onClick={() => {
+                                        const mappings = [...(((proc.options as Record<string, unknown>).sheetNameFieldMappings) as Array<{ targetField: OrderField; extractPattern?: string }> || [])];
+                                        mappings.splice(mi, 1);
+                                        updateProcessorOptions(idx, { ...proc.options, sheetNameFieldMappings: mappings });
+                                      }}
+                                      className="text-[#cf1322] text-sm hover:underline"
+                                    >删除</button>
+                                  </div>
+                                ))}
+                                <button
+                                  onClick={() => {
+                                    const mappings = [...(((proc.options as Record<string, unknown>).sheetNameFieldMappings) as Array<{ targetField: OrderField; extractPattern?: string }> || [])];
+                                    mappings.push({ targetField: 'storeName' as OrderField });
+                                    updateProcessorOptions(idx, { ...proc.options, sheetNameFieldMappings: mappings });
+                                  }}
+                                  className="btn btn-outline btn-sm"
+                                >+ 添加字段映射</button>
+                              </div>
                             </div>
                           )}
                         </div>
@@ -671,7 +745,7 @@ export default function RuleEditorModal({ rule, onSave, onClose }: RuleEditorMod
                             <tr key={i} className={hasError ? 'bg-[#fff1f0]' : i % 2 === 0 ? 'bg-white' : 'bg-[#fafbfc]'}>
                               {COLUMN_MAPPING_FIELDS.map(f => (
                                 <td key={f} className="px-2 py-1 border-b border-[#e5e6eb] max-w-[120px] truncate">
-                                  {String((rec as Record<string, unknown>)[f] ?? '')}
+                                  {String(((rec as unknown) as Record<string, unknown>)[f] ?? '')}
                                 </td>
                               ))}
                               <td className="px-2 py-1 border-b border-[#e5e6eb]">
@@ -707,10 +781,10 @@ export default function RuleEditorModal({ rule, onSave, onClose }: RuleEditorMod
               const toastId = toast.loading('正在保存规则...');
               try {
                 const isEdit = !!(rule?.id);
-                const url = isEdit ? '/api/rules' : '/api/rules';
+                const url = isEdit ? `/api/rules/${rule!.id}` : '/api/rules';
                 const method = isEdit ? 'PUT' : 'POST';
                 const body = isEdit
-                  ? { ...form, id: rule!.id }
+                  ? form
                   : { ...form, isAiGenerated: rule?.isAiGenerated ?? false, aiConfidence: rule?.aiConfidence || {} };
 
                 const res = await fetch(url, {

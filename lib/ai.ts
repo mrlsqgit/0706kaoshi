@@ -60,11 +60,13 @@ const SYSTEM_PROMPT = `你是一个文件解析规则专家。你的任务是分
 处理器（processors）说明：
 1. tailInfoExtraction - 尾部信息提取: 收货人信息在数据区之外的尾部行
    options: { "tailRowsCount": 3, "fieldMappings": [{ "targetField": "receiverName", "keywordPattern": "收货人|收件人|联系人", "extractPattern": "提取正则" }] }
-2. crossRowAggregation - 跨行聚合: 同一配送单号下多行共享收货人信息
+2. headerInfoExtraction - 顶部信息提取: 收货门店等字段出现在被 headerRowsToSkip 跳过的顶部标题/表头行中（如第一行"收货机构/调入门店/收货门店: xxx"）
+   options: { "headerRowsCount": 3, "fieldMappings": [{ "targetField": "storeName", "keywordPattern": "收货机构|调入门店|收货门店|门店", "extractPattern": "[:：]\\s*(.+)" }] }
+3. crossRowAggregation - 跨行聚合: 同一配送单号下多行共享收货人信息
    options: { "groupByField": "externalCode" }
-3. matrixTranspose - 矩阵转置: 列头是门店/日期，需要转置
+4. matrixTranspose - 矩阵转置: 列头是门店/日期，需要转置
    options: { "rowIdentifierFields": ["skuName"], "columnHeaderStartIndex": 2, "columnValueField": "storeName", "cellSplitSeparator": "\\n", "cellSplitItemFormat": "[xX×]" }
-4. cardDetection - 卡片式: 每条记录是一个独立卡片
+5. cardDetection - 卡片式: 每条记录是一个独立卡片
    options: { "cardStartKeyword": "▶|调拨记录", "internalFieldPatterns": [{ "targetField": "storeName", "keyword": "门店|收货门店" }] }
 
 重要规则：
@@ -72,7 +74,80 @@ const SYSTEM_PROMPT = `你是一个文件解析规则专家。你的任务是分
 - 返回的规则应该是一般化的配置
 - 所有字段映射都要有 confidence 评分
 - 对于不确定的映射，confidence 设为 50 以下
-- 只返回 JSON，不要有其他内容`;
+- 只返回纯 JSON 对象，不要使用代码块（markdown 围栏）包裹，不要加 // 或 /* */ 注释，不要使用尾随逗号（trailing comma）
+- 确保 JSON 完整闭合（所有 { } 和 [ ] 成对），不要中途截断
+
+必填与结构约束（务必遵守，否则解析会校验报错）：
+1. storeName(收货门店) 与 收件人信息(receiverName/receiverPhone/receiverAddress) 至少要有其一。
+   - 若 storeName 在被跳过的顶部表头行里（如"收货机构/调入门店/收货门店: xxx"），必须启用 headerInfoExtraction 处理器（headerRowsCount 覆盖到该标题行），用 fieldMappings 按关键词提取，绝不能用低置信度"推测"列映射去填它。
+   - 若收件人信息在底部页脚区，必须启用 tailInfoExtraction 提取。
+   - 绝不允许 storeName 与收件人信息同时为空。
+2. receiverPhone / receiverAddress 只有在文件里确实出现"收货电话/联系电话/收货地址"等对应信息时才映射，并通过 tailInfoExtraction / headerInfoExtraction 提取；若文件根本没有这些字段，不要臆造，留空即可（不要给 20% 的瞎猜映射）。
+3. 只要文件存在 SKU 明细列（物品编码/物品名称/规格/数量等），就必须映射 skuCode、skuName、skuQuantity、skuSpec 四个字段；skuQuantity 对应"数量/发货数量/出库数量"列，必须为正数。
+4. sourceColumn 只能使用预览 headers 中真实存在的列名，不得臆造；preview 里提供了 headers、sampleRows、sampleRowsTail，请据此判断表头位置。
+5. headerRowsToSkip：数清"真正的列标题行"之前有几行（大标题、空行、说明文字）就填几；footerRowsToSkip 同理（底部收货信息、合计行）。不要漏填也不要多填。
+6. summaryRowKeywords 必须包含 ["合计","总计","小计"] 以跳过汇总行。
+7. 不确定字段不要强行映射，宁可留空并给出低 confidence，也不要映射到错误列。`;
+
+// 从模型返回中尽量稳健地解析出 JSON 对象：
+// 1) 去掉 ``` 代码块包裹 2) 截取最外层 {} 3) 去除尾随逗号
+// 4) 若仍失败（被截断），按括号配对补全缺失的 } / ]
+function tolerantJsonParse(raw: string): unknown {
+  // 1) 去 markdown 代码块
+  let s = raw.trim();
+  const fence = s.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (fence) s = fence[1].trim();
+
+  // 2) 截取最外层 { }
+  const start = s.indexOf('{');
+  const end = s.lastIndexOf('}');
+  if (start !== -1 && end !== -1 && end > start) {
+    s = s.slice(start, end + 1);
+  }
+
+  // 3) 去尾随逗号（JSON.parse 不支持），注意避开字符串内的逗号
+  s = s.replace(/,(\s*[}\]])/g, '$1');
+
+  const tryParse = (str: string): unknown | null => {
+    try {
+      return JSON.parse(str);
+    } catch {
+      return null;
+    }
+  };
+
+  const first = tryParse(s);
+  if (first !== null) return first;
+
+  // 4) 括号配对补全（处理被 max_tokens 截断的情况）
+  const stack: string[] = [];
+  const pairs: Record<string, string> = { '{': '}', '[': ']' };
+  let inStr = false;
+  let esc = false;
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (ch === '\\') esc = true;
+      else if (ch === '"') inStr = false;
+    } else {
+      if (ch === '"') inStr = true;
+      else if (ch === '{' || ch === '[') stack.push(pairs[ch]);
+      else if (ch === '}' || ch === ']') {
+        if (stack.length && stack[stack.length - 1] === ch) stack.pop();
+        else break; // 出现多余闭合，说明已损坏，停止
+      }
+    }
+  }
+  // 若截断处正好在一个未完成的键/值上（如末尾是 "abc":），先补一个 null 占位
+  const trimmed = s.replace(/,\s*$/, '').replace(/:\s*$/, ':null');
+  let repaired = trimmed;
+  while (stack.length) repaired += stack.pop();
+  const second = tryParse(repaired);
+  if (second !== null) return second;
+
+  throw new Error('无法解析模型返回的 JSON');
+}
 
 export async function generateRuleFromAI(
   filePreview: unknown,
@@ -122,12 +197,34 @@ ${previewStr.slice(0, 8000)}
         { role: 'user', content: userMessage },
       ],
       temperature: 0.3,
-      max_tokens: 4096,
-      timeout: 30_000, // 30 秒超时
+      max_tokens: 8192,
+      timeout: 120_000, // 思考模型更慢，放宽到 120 秒
     });
 
-    const content = response.choices[0]?.message?.content || '';
-    
+    let content = response.choices[0]?.message?.content || '';
+
+    // 兜底：若 content 为空但模型带有 reasoning_content（思考模型 token 预算被思考过程吃光），
+    // 再请求一次，给更大的 max_tokens，避免最终答案为空。
+    if (!content.trim()) {
+      const finishReason = response.choices[0]?.finish_reason;
+      console.warn('[AI] 首次返回 content 为空, finish_reason=', finishReason, '，尝试加大 max_tokens 重试');
+      try {
+        const retry = await client.chat.completions.create({
+          model: config.model,
+          messages: [
+            { role: 'system', content: SYSTEM_PROMPT },
+            { role: 'user', content: userMessage },
+          ],
+          temperature: 0.3,
+          max_tokens: 16384,
+          timeout: 180_000,
+        });
+        content = retry.choices[0]?.message?.content || '';
+      } catch (retryErr) {
+        console.error('[AI] 兜底重试失败:', retryErr);
+      }
+    }
+
     if (!content.trim()) {
       return {
         rule: {},
@@ -138,22 +235,9 @@ ${previewStr.slice(0, 8000)}
     }
 
     console.log('AI raw response:', content.slice(0, 500));
-    
-    // 提取 JSON
-    let jsonStr = content;
-    const jsonMatch = content.match(/```(?:json)?\s*([\s\S]*?)```/);
-    if (jsonMatch) {
-      jsonStr = jsonMatch[1].trim();
-    }
 
-    // 尝试找到第一个 { 到最后一个 }
-    const startIdx = jsonStr.indexOf('{');
-    const endIdx = jsonStr.lastIndexOf('}');
-    if (startIdx !== -1 && endIdx !== -1) {
-      jsonStr = jsonStr.slice(startIdx, endIdx + 1);
-    }
-
-    const parsed = JSON.parse(jsonStr);
+    // 容错解析 JSON（自动处理尾随逗号、代码块包裹、截断补全）
+    const parsed = tolerantJsonParse(content);
 
     // 构建规则
     const rule: Partial<ParseRule> = {
@@ -231,7 +315,8 @@ export async function parseWithAI(
         },
       ],
       temperature: 0.1,
-      max_tokens: 4096,
+      max_tokens: 8192,
+      timeout: 120_000,
     });
 
     const content = response.choices[0]?.message?.content || '';
