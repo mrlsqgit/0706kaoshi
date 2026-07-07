@@ -5,8 +5,37 @@ import { ParseRule, OrderRecord, FileType, SheetMergeMode } from './types';
 import { v4 as uuidv4 } from 'uuid';
 import { getSql, isDbConfigured } from './db-client';
 
-const useDb = isDbConfigured();
-console.log(`[DB] 存储引擎: ${useDb ? 'Neon PostgreSQL' : '内存存储 (Memory)'}`);
+const dbConfigured = isDbConfigured();
+// 运行时降级标志：一旦检测到 Neon 不可达（如 fetch failed / 网络受限 / 数据库暂停），
+// 后续所有读写自动回退到内存存储，避免界面出现「保存失败：创建规则失败」这类硬错误。
+let dbBroken = false;
+console.log(`[DB] 存储引擎初始配置: ${dbConfigured ? 'Neon PostgreSQL' : '内存存储 (Memory)'}`);
+
+// 统一封装：优先走 Neon，连接失败时降级到内存存储；
+// 同一进程内一旦降级不再重试 Neon，避免每次请求都反复超时/抛错。
+async function safeNeon<T>(fn: () => Promise<T>, fallback: () => Promise<T>): Promise<T> {
+  if (dbBroken || !dbConfigured) return fallback();
+  try {
+    return await fn();
+  } catch (err) {
+    console.error('[DB] Neon 连接失败，降级到内存存储:', err instanceof Error ? err.message : err);
+    dbBroken = true;
+    return fallback();
+  }
+}
+
+// 启动期异步探测：Neon 配置存在时尝试一次轻量连接，失败立即标记降级（避免首请求才暴露超时）。
+if (dbConfigured) {
+  (async () => {
+    try {
+      await getSql()`SELECT 1`;
+      console.log('[DB] Neon 连通性正常');
+    } catch (err) {
+      console.warn('[DB] 初始连通性探测失败，将使用内存存储:', err instanceof Error ? err.message : err);
+      dbBroken = true;
+    }
+  })();
+}
 
 // ====== 辅助函数 ======
 
@@ -391,56 +420,56 @@ class MemoryStore {
 
 const memoryStore = new MemoryStore();
 
-// ====== 统一导出接口 ======
+// ====== 统一导出接口（Neon 不可达时自动降级到内存存储） ======
 
 export async function getRules(): Promise<ParseRule[]> {
-  return useDb ? NeonStore.getRules() : memoryStore.getRules();
+  return safeNeon(() => NeonStore.getRules(), () => memoryStore.getRules());
 }
 
 export async function getRule(id: string): Promise<ParseRule | null> {
-  return useDb ? NeonStore.getRule(id) : memoryStore.getRule(id);
+  return safeNeon(() => NeonStore.getRule(id), () => memoryStore.getRule(id));
 }
 
 export async function createRule(rule: Omit<ParseRule, 'id' | 'createdAt' | 'updatedAt'>): Promise<ParseRule> {
-  return useDb ? NeonStore.createRule(rule) : memoryStore.createRule(rule);
+  return safeNeon(() => NeonStore.createRule(rule), () => memoryStore.createRule(rule));
 }
 
 export async function updateRule(id: string, rule: Partial<ParseRule>): Promise<ParseRule | null> {
-  return useDb ? NeonStore.updateRule(id, rule) : memoryStore.updateRule(id, rule);
+  return safeNeon(() => NeonStore.updateRule(id, rule), () => memoryStore.updateRule(id, rule));
 }
 
 export async function deleteRule(id: string): Promise<boolean> {
-  return useDb ? NeonStore.deleteRule(id) : memoryStore.deleteRule(id);
+  return safeNeon(() => NeonStore.deleteRule(id), () => memoryStore.deleteRule(id));
 }
 
 export async function deleteOrdersByExternalCode(codes: string[]): Promise<number> {
-  return useDb ? NeonStore.deleteOrdersByExternalCode(codes) : memoryStore.deleteOrdersByExternalCode(codes);
+  return safeNeon(() => NeonStore.deleteOrdersByExternalCode(codes), () => memoryStore.deleteOrdersByExternalCode(codes));
 }
 
 export async function deleteOrdersByExternalCodePrefix(prefix: string): Promise<number> {
-  return useDb ? NeonStore.deleteOrdersByExternalCodePrefix(prefix) : memoryStore.deleteOrdersByExternalCodePrefix(prefix);
+  return safeNeon(() => NeonStore.deleteOrdersByExternalCodePrefix(prefix), () => memoryStore.deleteOrdersByExternalCodePrefix(prefix));
 }
 
 export async function dedupOrders(): Promise<number> {
-  return useDb ? NeonStore.dedupOrders() : memoryStore.dedupOrders();
+  return safeNeon(() => NeonStore.dedupOrders(), () => memoryStore.dedupOrders());
 }
 
 export async function truncateOrders(): Promise<number> {
-  return useDb ? NeonStore.truncateOrders() : memoryStore.truncateOrders();
+  return safeNeon(() => NeonStore.truncateOrders(), () => memoryStore.truncateOrders());
 }
 
 export async function getOrders(page: number, pageSize: number, filters?: { externalCode?: string; receiverName?: string; createdAtStart?: string; createdAtEnd?: string }): Promise<{ orders: OrderRecord[]; total: number }> {
-  return useDb ? NeonStore.getOrders(page, pageSize, filters) : memoryStore.getOrders(page, pageSize, filters);
+  return safeNeon(() => NeonStore.getOrders(page, pageSize, filters), () => memoryStore.getOrders(page, pageSize, filters));
 }
 
 export async function createOrders(orders: OrderRecord[]): Promise<OrderRecord[]> {
-  return useDb ? NeonStore.createOrders(orders) : memoryStore.createOrders(orders);
+  return safeNeon(() => NeonStore.createOrders(orders), () => memoryStore.createOrders(orders));
 }
 
 export async function checkDuplicateExternalCodes(codes: string[], excludeBatchId?: string): Promise<string[]> {
-  return useDb ? NeonStore.checkDuplicateExternalCodes(codes) : memoryStore.checkDuplicateExternalCodes(codes, excludeBatchId);
+  return safeNeon(() => NeonStore.checkDuplicateExternalCodes(codes), () => memoryStore.checkDuplicateExternalCodes(codes, excludeBatchId));
 }
 
 export async function getAllExternalCodes(): Promise<Set<string>> {
-  return useDb ? NeonStore.getAllExternalCodes() : memoryStore.getAllExternalCodes();
+  return safeNeon(() => NeonStore.getAllExternalCodes(), () => memoryStore.getAllExternalCodes());
 }
