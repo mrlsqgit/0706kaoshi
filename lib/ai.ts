@@ -203,16 +203,18 @@ ${previewStr.slice(0, 8000)}
 
 请分析文件结构并生成适用的解析规则 JSON。`;
 
-    const response = await client.chat.completions.create({
-      model: config.model,
-      messages: [
-        { role: 'system', content: SYSTEM_PROMPT },
-        { role: 'user', content: userMessage },
-      ],
-      temperature: 0.3,
-      max_tokens: 8192,
-      timeout: 120_000, // 思考模型更慢，放宽到 120 秒
-    });
+    const response = await client.chat.completions.create(
+      {
+        model: config.model,
+        messages: [
+          { role: 'system', content: SYSTEM_PROMPT },
+          { role: 'user', content: userMessage },
+        ],
+        temperature: 0.3,
+        max_tokens: 8192,
+      },
+      { timeout: 120_000 }, // 思考模型更慢，放宽到 120 秒
+    );
 
     let content = response.choices[0]?.message?.content || '';
 
@@ -222,16 +224,18 @@ ${previewStr.slice(0, 8000)}
       const finishReason = response.choices[0]?.finish_reason;
       console.warn('[AI] 首次返回 content 为空, finish_reason=', finishReason, '，尝试加大 max_tokens 重试');
       try {
-        const retry = await client.chat.completions.create({
-          model: config.model,
-          messages: [
-            { role: 'system', content: SYSTEM_PROMPT },
-            { role: 'user', content: userMessage },
-          ],
-          temperature: 0.3,
-          max_tokens: 16384,
-          timeout: 180_000,
-        });
+        const retry = await client.chat.completions.create(
+          {
+            model: config.model,
+            messages: [
+              { role: 'system', content: SYSTEM_PROMPT },
+              { role: 'user', content: userMessage },
+            ],
+            temperature: 0.3,
+            max_tokens: 16384,
+          },
+          { timeout: 180_000 },
+        );
         content = retry.choices[0]?.message?.content || '';
       } catch (retryErr) {
         console.error('[AI] 兜底重试失败:', retryErr);

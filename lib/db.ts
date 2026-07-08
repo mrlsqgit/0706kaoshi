@@ -4,6 +4,7 @@
 import { ParseRule, OrderRecord, FileType, SheetMergeMode } from './types';
 import { v4 as uuidv4 } from 'uuid';
 import { getSql, isDbConfigured } from './db-client';
+import { PRESET_RULES } from './preset-rules';
 
 const dbConfigured = isDbConfigured();
 // 运行时降级标志：一旦检测到 Neon 不可达（如 fetch failed / 网络受限 / 数据库暂停），
@@ -420,9 +421,37 @@ class MemoryStore {
 
 const memoryStore = new MemoryStore();
 
+// ====== 预设（黄金）规则：启动时写入存储 ======
+// 这些规则针对已知结构的文件，提供「实测 0 错误」的确定性解析。
+// 当 AI 生成的规则直接套用失败时，前端会按文件名匹配到它们并以 100% 置信度应用，
+// 因此不会影响其他文件的既有解析逻辑。
+
+let presetsPromise: Promise<void> | null = null;
+function ensurePresets(): Promise<void> {
+  if (presetsPromise) return presetsPromise;
+  presetsPromise = (async () => {
+    for (const rule of PRESET_RULES) {
+      await safeNeon(
+        async () => {
+          const existing = await NeonStore.getRules();
+          if (!existing.some((r) => r.name === rule.name)) {
+            await NeonStore.createRule(rule);
+          }
+        },
+        async () => {
+          const exists = (await memoryStore.getRules()).some((r) => r.name === rule.name);
+          if (!exists) await memoryStore.createRule(rule);
+        }
+      );
+    }
+  })();
+  return presetsPromise;
+}
+
 // ====== 统一导出接口（Neon 不可达时自动降级到内存存储） ======
 
 export async function getRules(): Promise<ParseRule[]> {
+  await ensurePresets();
   return safeNeon(() => NeonStore.getRules(), () => memoryStore.getRules());
 }
 

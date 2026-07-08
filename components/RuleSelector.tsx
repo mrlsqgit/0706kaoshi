@@ -30,6 +30,8 @@ export default function RuleSelector({ parsedData, onRuleSelected, selectedRule 
   const [aiValidation, setAiValidation] = useState<{ count: number; errRows: number } | null>(null);
   // AI 生成后基于当前文件的「实测解析」结果（反推实测置信度）
   const [aiParseTest, setAiParseTest] = useState<{ count: number; errRows: number } | null>(null);
+  // 当 AI 规则无法直接零错误套用时，是否命中「按文件名匹配的黄金规则」可兜底（显示给用户）
+  const [goldenFallback, setGoldenFallback] = useState<string | null>(null);
 
   useEffect(() => {
     loadRules();
@@ -48,41 +50,6 @@ export default function RuleSelector({ parsedData, onRuleSelected, selectedRule 
       setLoading(false);
     }
   };
-
-  const handleAiGenerate = useCallback(async () => {
-    setAiLoading(true);
-    setAiResult(null);
-    setAiValidation(null);
-    setAiParseTest(null);
-    try {
-      const preview = getPreviewForAI(parsedData);
-      const res = await fetch('/api/ai/generate-rule', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          filePreview: preview,
-          fileName: parsedData.fileName,
-          fileType: parsedData.fileType,
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        setAiResult({ rule: {}, analysis: '', confidence: {}, error: data.error || 'AI 生成失败' });
-      } else {
-        setAiResult(data);
-        // 生成后立即用当前文件实测，反推「实测置信度」（替代模型自评的片面性）
-        if (data.rule) {
-          const test = testRule(normalizeRule(data.rule));
-          setAiParseTest(test);
-        }
-        toast.success('AI 已分析文件结构并生成推荐规则，请检查并确认');
-      }
-    } catch (err) {
-      setAiResult({ rule: {}, analysis: '', confidence: {}, error: `AI 请求失败: ${err}` });
-    } finally {
-      setAiLoading(false);
-    }
-  }, [parsedData]);
 
   // 将 Partial 规则补全为可直接交给引擎的完整规则（仅用于本地预校验）
   const normalizeRule = useCallback(
@@ -151,6 +118,68 @@ export default function RuleSelector({ parsedData, onRuleSelected, selectedRule 
     [parsedData]
   );
 
+  // 按上传文件名匹配、且能零错误解析当前文件的黄金（预设）规则（兜底用）
+  const findGoldenFallback = useCallback((): ParseRule | null => {
+    const baseName = (parsedData.fileName || '').replace(/\.[^.]+$/, '');
+    const scored = rules
+      .filter((r) => r.fileType === parsedData.fileType)
+      .map((r) => ({ rule: r, score: nameScore(baseName, r.name), errRows: testRule(r).errRows }))
+      .filter((x) => x.score > 0)
+      .sort((a, b) => b.score - a.score);
+    const nameZero = scored.find((x) => x.errRows === 0);
+    if (nameZero) return nameZero.rule;
+    let best: { rule: ParseRule; errRows: number } | null = null;
+    for (const r of rules) {
+      if (r.fileType !== parsedData.fileType) continue;
+      const t = testRule(r);
+      if (!best || t.errRows < best.errRows) best = { rule: r, errRows: t.errRows };
+    }
+    return best && best.errRows === 0 ? best.rule : null;
+  }, [rules, parsedData, nameScore, testRule]);
+
+  const handleAiGenerate = useCallback(async () => {
+    setAiLoading(true);
+    setAiResult(null);
+    setAiValidation(null);
+    setAiParseTest(null);
+    setGoldenFallback(null);
+    try {
+      const preview = getPreviewForAI(parsedData);
+      const res = await fetch('/api/ai/generate-rule', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          filePreview: preview,
+          fileName: parsedData.fileName,
+          fileType: parsedData.fileType,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setAiResult({ rule: {}, analysis: '', confidence: {}, error: data.error || 'AI 生成失败' });
+      } else {
+        setAiResult(data);
+        // 生成后立即用当前文件实测，反推「实测置信度」（替代模型自评的片面性）
+        if (data.rule) {
+          const test = testRule(normalizeRule(data.rule));
+          setAiParseTest(test);
+          // 若 AI 规则无法直接零错误套用（有错误 或 解析出 0 条），检查是否存在按文件名匹配的黄金规则可兜底
+          if (test.errRows > 0 || test.count === 0) {
+            const g = findGoldenFallback();
+            setGoldenFallback(g ? g.name : null);
+          } else {
+            setGoldenFallback(null);
+          }
+        }
+        toast.success('AI 已分析文件结构并生成推荐规则，请检查并确认');
+      }
+    } catch (err) {
+      setAiResult({ rule: {}, analysis: '', confidence: {}, error: `AI 请求失败: ${err}` });
+    } finally {
+      setAiLoading(false);
+    }
+  }, [parsedData, findGoldenFallback]);
+
   // 直接应用 AI 规则并解析（先本地预校验，失败则自动改用匹配的可用规则）
   const handleApplyAiRule = useCallback(async () => {
     if (!aiResult?.rule) return;
@@ -161,7 +190,7 @@ export default function RuleSelector({ parsedData, onRuleSelected, selectedRule 
       const aiRuleFull = normalizeRule(aiResult.rule);
       const aiTest = testRule(aiRuleFull);
 
-      if (aiTest.errRows > 0) {
+      if (aiTest.errRows > 0 || aiTest.count === 0) {
         // 2) AI 规则有错误：优先按「上传文件名」匹配已有规则（而非只看错误数）
         const baseName = (parsedData.fileName || '').replace(/\.[^.]+$/, '');
 
@@ -308,9 +337,10 @@ export default function RuleSelector({ parsedData, onRuleSelected, selectedRule 
                     模型自评置信度: {aiResult.confidence?.overall || '--'}%
                   </span>
                   {aiParseTest && (
-                    <span className={`tag ${aiParseTest.errRows === 0 ? 'tag-primary' : 'tag-danger'}`}>
-                      实测置信度: {aiParseTest.count > 0 ? Math.round((1 - aiParseTest.errRows / aiParseTest.count) * 100) : 100}%
-                      （{aiParseTest.count} 条 / {aiParseTest.errRows} 错）
+                    <span className={`tag ${goldenFallback ? 'tag-primary' : aiParseTest.errRows === 0 ? 'tag-primary' : 'tag-danger'}`}>
+                      {goldenFallback
+                        ? `实测置信度: 100%（将自动套用黄金规则「${goldenFallback}」）`
+                        : `实测置信度: ${aiParseTest.count > 0 ? Math.round((1 - aiParseTest.errRows / aiParseTest.count) * 100) : 100}% （${aiParseTest.count} 条 / ${aiParseTest.errRows} 错）`}
                     </span>
                   )}
                   {aiResult.confidence?.overall != null && aiResult.confidence.overall < 70 && (
@@ -396,7 +426,7 @@ export default function RuleSelector({ parsedData, onRuleSelected, selectedRule 
                     ✅ 直接应用
                   </button>
                   <button
-                    onClick={() => { setAiResult(null); setAiValidation(null); setAiParseTest(null); }}
+                    onClick={() => { setAiResult(null); setAiValidation(null); setAiParseTest(null); setGoldenFallback(null); }}
                     className="btn btn-outline btn-sm"
                   >
                     重新生成
@@ -438,17 +468,18 @@ export default function RuleSelector({ parsedData, onRuleSelected, selectedRule 
               <div
                 key={rule.id}
                 className={`
-                  p-4 rounded-xl border cursor-pointer transition-all
+                  py-1.5 px-3 rounded-xl border cursor-pointer transition-all overflow-hidden
                   ${selectedRule?.id === rule.id
                     ? 'border-[#0fc6c2] bg-[#e8fafa]'
                     : 'border-[#e5e6eb] bg-white hover:border-[#0fc6c2] hover:shadow-md'
                   }
                 `}
                 onClick={() => onRuleSelected(rule)}
+                title={rule.description || undefined}
               >
                 <div className="flex items-center justify-between">
-                  <div>
-                    <span className="font-semibold text-[#1d2129]">{rule.name}</span>
+                  <div className="min-w-0 overflow-hidden">
+                    <span className="font-semibold text-[#1d2129] text-sm leading-tight">{rule.name}</span>
                     <span className="tag tag-primary ml-2">{rule.fileType.toUpperCase()}</span>
                     {rule.isAiGenerated && (
                       <span className="tag tag-info ml-1">AI生成</span>
@@ -457,14 +488,16 @@ export default function RuleSelector({ parsedData, onRuleSelected, selectedRule 
                       <span className="tag tag-warning ml-1">⚠低置信度</span>
                     )}
                   </div>
-                  <span className="text-xs text-[#86909c]">
+                  <span className="text-xs text-[#86909c] whitespace-nowrap ml-2 leading-tight">
                     {new Date(rule.updatedAt).toLocaleDateString()}
                   </span>
                 </div>
                 {rule.description && (
-                  <p className="text-sm text-[#86909c] mt-1 truncate">{rule.description}</p>
+                  <p className="text-xs text-[#86909c] mt-0.5 leading-tight truncate" title={rule.description}>
+                    {rule.description}
+                  </p>
                 )}
-                <div className="flex items-center gap-2 mt-2 text-xs text-[#86909c]">
+                <div className="flex items-center gap-2 mt-0.5 text-xs text-[#86909c] leading-tight truncate">
                   <span>跳过头部 {rule.headerRowsToSkip} 行</span>
                   <span>·</span>
                   <span>{rule.columnMappings.length} 个字段映射</span>

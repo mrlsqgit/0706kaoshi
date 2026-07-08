@@ -17,6 +17,7 @@ import RuleEditorModal from '@/components/RuleEditorModal';
 
 const PROCESSOR_LABELS: Record<ProcessorType, string> = {
   tailInfoExtraction: '尾部信息提取',
+  headerInfoExtraction: '头部信息提取',
   crossRowAggregation: '跨行聚合',
   matrixTranspose: '矩阵转置',
   cardDetection: '卡片检测',

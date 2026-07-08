@@ -179,24 +179,34 @@ function processTailInfoExtraction(
       let extracted = '';
       // 策略1：关键词可在任意列，其值取其后第一个「非关键字」单元格
       // （兼容一行多 KV：如 "收货门店：xx  联系人：yy  收货地址：zz"）
-      for (let j = 0; j < cells.length - 1; j++) {
-        if (new RegExp(mapping.keywordPattern, 'i').test(cells[j])) {
-          for (let k = j + 1; k < cells.length; k++) {
-            const candidate = cells[k];
-            if (!candidate) continue;
-            const isOtherKey = otherPatterns.some(
-              p => new RegExp(p.keywordPattern, 'i').test(candidate)
-            );
-            if (!isOtherKey) {
-              extracted = candidate;
-              break;
-            }
+      for (let j = 0; j < cells.length; j++) {
+        if (!new RegExp(mapping.keywordPattern, 'i').test(cells[j])) continue;
+        const kwm = cells[j].match(new RegExp(mapping.keywordPattern, 'i'));
+        const afterKw = kwm ? cells[j].slice((kwm.index ?? 0) + kwm[0].length).trim() : '';
+        // PDF 单行文本：关键字与值在同一单元格，直接正则提取该单元格
+        if (afterKw && mapping.extractPattern) {
+          const m = cells[j].match(new RegExp(mapping.extractPattern, 'i'));
+          if (m && (m[1] || m[0])) {
+            extracted = (m[1] || m[0]).trim();
+            break;
           }
-          if (extracted) break;
         }
+        // Excel 多列 KV：值取其后第一个「非关键字」单元格
+        for (let k = j + 1; k < cells.length; k++) {
+          const candidate = cells[k];
+          if (!candidate) continue;
+          const isOtherKey = otherPatterns.some(
+            p => new RegExp(p.keywordPattern, 'i').test(candidate)
+          );
+          if (!isOtherKey) {
+            extracted = candidate;
+            break;
+          }
+        }
+        if (extracted) break;
       }
       // 策略2：正则提取（fallback，取首个冒号后的内容）
-      if (!extracted) {
+      if (!extracted && mapping.extractPattern) {
         extracted = extractByPattern(rowText, mapping.extractPattern);
       }
       if (extracted) {
@@ -221,24 +231,40 @@ function processHeaderInfoExtraction(
     for (const row of headerRows) {
       const rowText = Object.values(row).map(v => String(v ?? '')).join(' ').trim();
       if (new RegExp(mapping.keywordPattern, 'i').test(rowText)) {
-        // 策略1：第一列匹配关键词 → 取第二列作为值（交替 KV 格式）
+        // 策略1：第一列匹配关键词 → 取其后的值
         const firstCol = Object.values(row)[0];
         if (firstCol != null && new RegExp(mapping.keywordPattern, 'i').test(String(firstCol))) {
-          const cells = Object.values(row).slice(1).map(v => String(v ?? '').trim());
-          const otherPatterns = options.fieldMappings.filter(
-            m => m.keywordPattern !== mapping.keywordPattern
-          );
-          for (const cell of cells) {
-            if (!cell) continue;
-            const isOtherKey = otherPatterns.some(
-              p => new RegExp(p.keywordPattern, 'i').test(cell)
+          const fc = String(firstCol);
+          let extracted = '';
+          // PDF 单行文本：关键字与值常在同一单元格（如 "收货机构：xxx   订货机构：xxx"），
+          // 此时应直接对该单元格正则提取，而非取「下一单元格」（下一单元格只是页码，会污染取值）。
+          const kwm = fc.match(new RegExp(mapping.keywordPattern, 'i'));
+          const afterKw = kwm ? fc.slice((kwm.index ?? 0) + kwm[0].length).trim() : '';
+          if (afterKw && mapping.extractPattern) {
+            const m = fc.match(new RegExp(mapping.extractPattern, 'i'));
+            if (m && (m[1] || m[0])) extracted = (m[1] || m[0]).trim();
+          }
+          // Excel 多列 KV：值取下一单元格（跳过其它关键字单元格）
+          if (!extracted) {
+            const cells = Object.values(row).slice(1).map(v => String(v ?? '').trim());
+            const otherPatterns = options.fieldMappings.filter(
+              m => m.keywordPattern !== mapping.keywordPattern
             );
-            if (!isOtherKey) {
-              headerInfo[mapping.targetField] = cell;
-              break;
+            for (const cell of cells) {
+              if (!cell) continue;
+              const isOtherKey = otherPatterns.some(
+                p => new RegExp(p.keywordPattern, 'i').test(cell)
+              );
+              if (!isOtherKey) {
+                extracted = cell;
+                break;
+              }
             }
           }
-          if (headerInfo[mapping.targetField]) break;
+          if (extracted) {
+            headerInfo[mapping.targetField] = extracted;
+            break;
+          }
         }
         // 策略2：正则提取（fallback）
         if (!headerInfo[mapping.targetField]) {
