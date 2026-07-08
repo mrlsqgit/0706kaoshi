@@ -171,14 +171,10 @@ export default function RuleSelector({ parsedData, onRuleSelected, selectedRule 
           .filter((x) => x.score > 0)
           .sort((a, b) => b.score - a.score);
 
-        // 2.1) 按名称匹配、且能零错误解析的规则：直接应用
+        // 2.1) 按名称匹配、且能零错误解析的规则：直接套用（不提示「已自动改用」，以实测 100% 置信度应用）
         const nameZero = scored.find((x) => x.errRows === 0);
         if (nameZero) {
-          setAiValidation(aiTest);
-          toast.success(
-            `AI 规则解析出 ${aiTest.errRows} 处错误，已自动改用与文件名匹配的规则「${nameZero.rule.name}」（零错误）`,
-            { id: toastId, duration: 5000 }
-          );
+          toast.success('规则已匹配并应用，开始解析（实测置信度 100%）', { id: toastId, duration: 4000 });
           await loadRules();
           onRuleSelected(nameZero.rule);
           return;
@@ -193,11 +189,7 @@ export default function RuleSelector({ parsedData, onRuleSelected, selectedRule 
         }
 
         if (best && best.errRows === 0) {
-          setAiValidation(aiTest);
-          toast.success(
-            `AI 规则解析出 ${aiTest.errRows} 处错误，已自动改用可用规则「${best.rule.name}」（零错误，未找到文件名匹配项）`,
-            { id: toastId, duration: 5000 }
-          );
+          toast.success('规则已匹配并应用，开始解析（实测置信度 100%）', { id: toastId, duration: 4000 });
           await loadRules();
           onRuleSelected(best.rule);
           return;
